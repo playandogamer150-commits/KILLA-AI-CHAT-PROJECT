@@ -36,8 +36,35 @@ export type ChatThread = {
   title: string;
   kind?: ThreadKind;
   activeTool?: string | null;
+  activeTools?: string[];
   archived: boolean;
   createdAt: number;
   updatedAt: number;
   messages: ChatMessage[];
+};
+
+export type ReasoningTraceStepStatus = "pending" | "active" | "done";
+
+export type ReasoningTraceStep = {
+  id: string;
+  label: string;
+  status: ReasoningTraceStepStatus;
+  note?: string;
+};
+
+export type ReasoningTraceSource = {
+  title: string;
+  url?: string;
+};
+
+export type ReasoningTrace = {
+  mode: "think" | "deepsearch" | "hybrid";
+  title: string;
+  steps: ReasoningTraceStep[];
+  optimizer?: {
+    label: string;
+  };
+  optimizedQueries?: string[];
+  queries?: string[];
+  sources?: ReasoningTraceSource[];
 };

@@ -8,18 +8,143 @@ import MessageBubble from "./components/MessageBubble";
 import ProfileModal from "./components/ProfileModal";
 import Sidebar from "./components/Sidebar";
 import TopBar from "./components/TopBar";
-import type { ChatAttachment, ChatMessage, ChatThread, ModelOption, ThreadKind } from "./types";
+import type { ChatAttachment, ChatMessage, ChatThread, ModelOption, ReasoningTrace, ThreadKind } from "./types";
 
 const DEFAULT_MODEL_ID = "claude-opus-4-6";
 const UNTITLED_CHAT_TITLE = "Novo chat";
 const UNTITLED_MEDIA_TITLE = "Novo midia";
 const LEGACY_UNTITLED_CHAT_TITLE = "New chat";
 const LEGACY_UNTITLED_MEDIA_TITLE = "New media";
+const EDIT_IMAGE_MAX_ATTACHMENTS = 2;
+const TEXT_TOOL_IDS = new Set(["deepsearch", "think"]);
+const MEDIA_TOOL_IDS = new Set(["create-images", "edit-image", "create-video"]);
+
+type PendingImageAttachment = {
+  id: string;
+  name: string;
+  dataUrl: string;
+};
 
 const ALLOWED_TOOL_IDS = new Set(["deepsearch", "think", "create-images", "edit-image", "create-video"]);
 function coerceActiveTool(tool: unknown): string | null {
   if (typeof tool !== "string") return null;
   return ALLOWED_TOOL_IDS.has(tool) ? tool : null;
+}
+
+function coerceActiveTools(raw: unknown): string[] {
+  if (typeof raw === "string") {
+    const t = coerceActiveTool(raw);
+    return t ? [t] : [];
+  }
+  if (!Array.isArray(raw)) return [];
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const t = coerceActiveTool(item);
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
+function normalizeToolSelection(raw: string[]): string[] {
+  const tools = coerceActiveTools(raw);
+  if (!tools.length) return [];
+
+  const media = tools.filter((t) => MEDIA_TOOL_IDS.has(t));
+  if (media.length > 0) return [media[0]];
+
+  // Text modes can run together as a deliberate combo: DeepSearch + Think.
+  const ordered = ["deepsearch", "think"].filter((t) => tools.includes(t));
+  return ordered.slice(0, 2);
+}
+
+function createReasoningTrace(thinkEnabled: boolean, deepSearchEnabled: boolean): ReasoningTrace | null {
+  if (!thinkEnabled && !deepSearchEnabled) return null;
+
+  const mode: ReasoningTrace["mode"] = deepSearchEnabled && thinkEnabled ? "hybrid" : deepSearchEnabled ? "deepsearch" : "think";
+  const optimizerEnabled = deepSearchEnabled && thinkEnabled;
+  const title =
+    mode === "hybrid"
+      ? "KILLA esta usando THINK + DEEP SEARCH para pensar e buscar fontes..."
+      : mode === "deepsearch"
+        ? "KILLA esta usando DEEP SEARCH para pesquisar na internet..."
+        : "KILLA esta usando THINK para pensar profundamente...";
+
+  const steps: ReasoningTrace["steps"] = [
+    { id: "analyze", label: "Entendendo o contexto do pedido", status: "active" },
+    ...(optimizerEnabled ? [{ id: "optimize", label: "Optimizer Enhanced Research", status: "pending" as const }] : []),
+    ...(deepSearchEnabled ? [{ id: "search", label: "Pesquisando fontes na web", status: "pending" as const }] : []),
+    ...(deepSearchEnabled ? [{ id: "review", label: "Revisando fontes relevantes", status: "pending" as const }] : []),
+    ...(thinkEnabled ? [{ id: "plan", label: "Estruturando o raciocinio", status: "pending" as const }] : []),
+    { id: "answer", label: "Montando resposta final", status: "pending" },
+  ];
+
+  return {
+    mode,
+    title,
+    steps,
+    optimizer: optimizerEnabled ? { label: "Optimizer Enhanced Research ativo" } : undefined,
+    optimizedQueries: [],
+    queries: [],
+    sources: [],
+  };
+}
+
+function dedupeQueries(queries: string[], limit: number): string[] {
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const item of queries) {
+    const q = String(item || "").trim().replace(/\s+/g, " ");
+    if (!q || seen.has(q)) continue;
+    seen.add(q);
+    unique.push(q);
+    if (unique.length >= limit) break;
+  }
+  return unique;
+}
+
+function buildDeepSearchQueries(
+  prompt: string,
+  thinkEnabled: boolean
+): {
+  searchQueries: string[];
+  optimizedQueries: string[];
+} {
+  const base = String(prompt || "").trim().replace(/\s+/g, " ");
+  if (!base) return { searchQueries: [], optimizedQueries: [] };
+
+  const year = new Date().getFullYear();
+  const baselineQueries = [
+    base,
+    `${base} atualizado ${year}`,
+    `${base} fontes confiaveis`,
+    `${base} dados oficiais`,
+  ];
+
+  if (!thinkEnabled) {
+    return {
+      searchQueries: dedupeQueries(baselineQueries, 4),
+      optimizedQueries: [],
+    };
+  }
+
+  // Think + DeepSearch: create an optimized research strategy to improve result quality.
+  const optimizedQueries = dedupeQueries(
+    [
+      `"${base}" fonte oficial`,
+      `${base} comparativo tecnico ${year}`,
+      `${base} benchmark resultados ${year}`,
+      `${base} melhores praticas implementacao`,
+      `${base} riscos e limitacoes`,
+    ],
+    5
+  );
+
+  const searchQueries = dedupeQueries([...optimizedQueries, ...baselineQueries], 5);
+  return { searchQueries, optimizedQueries };
 }
 
 function coerceThreadKind(kind: unknown): ThreadKind {
@@ -37,6 +162,9 @@ function isUntitledTitle(title: string): boolean {
 
 function buildToolLoadingLabel(toolId: string | null, ctx?: { imageModelLabel?: string; durationSeconds?: number }): string {
   const tool = toolId || "";
+  if (tool === "deepsearch+think" || tool === "think+deepsearch") {
+    return "KILLA esta usando THINK + DEEP SEARCH para pensar e pesquisar fontes...";
+  }
   if (tool === "think") return "KILLA esta usando THINK para pensar profundamente...";
   if (tool === "deepsearch") return "KILLA esta usando DEEP SEARCH para pesquisar na internet...";
   if (tool === "create-images") {
@@ -90,6 +218,15 @@ type RawPuterModel = {
 const STORAGE_THREADS = "killa_chat_threads_v1";
 const STORAGE_ACTIVE_THREAD = "killa_chat_active_thread_v1";
 const STORAGE_IMAGE_MODEL = "killa_chat_image_model_v1";
+const STORAGE_VIDEO_MODEL = "killa_chat_video_model_v1";
+const STORAGE_MODEL_TOGGLE_COMPAT = "killa_model_toggle_compat_v1";
+
+type ModelToggleCompat = {
+  deepsearch: boolean;
+  think: boolean;
+  combo: boolean;
+  verifiedAt: number;
+};
 
 function normalizeModelName(model: RawPuterModel): string {
   return model.name || model.id;
@@ -344,11 +481,13 @@ function isAbortError(error: unknown): boolean {
 function createInitialThread(kind: ThreadKind = "chat"): ChatThread {
   const now = Date.now();
   const k = coerceThreadKind(kind);
+  const defaultTools = k === "media" ? ["create-images"] : [];
   return {
     id: crypto.randomUUID(),
     title: k === "media" ? UNTITLED_MEDIA_TITLE : UNTITLED_CHAT_TITLE,
     kind: k,
-    activeTool: k === "media" ? "create-images" : null,
+    activeTool: defaultTools[0] || null,
+    activeTools: defaultTools,
     archived: false,
     createdAt: now,
     updatedAt: now,
@@ -376,11 +515,23 @@ function loadThreadsFromStorage(): { threads: ChatThread[]; activeId: string } {
     }
 
     const parsed = JSON.parse(raw) as ChatThread[];
-    const threads = (Array.isArray(parsed) ? parsed : []).map((t) => ({
-      ...t,
-      kind: coerceThreadKind((t as { kind?: unknown }).kind),
-      activeTool: coerceActiveTool((t as { activeTool?: unknown }).activeTool),
-    }));
+    const threads = (Array.isArray(parsed) ? parsed : []).map((t) => {
+      const normalizedTools = normalizeToolSelection(
+        coerceActiveTools(
+          (t as {
+            activeTools?: unknown;
+            activeTool?: unknown;
+          }).activeTools ?? (t as { activeTool?: unknown }).activeTool
+        )
+      );
+
+      return {
+        ...t,
+        kind: coerceThreadKind((t as { kind?: unknown }).kind),
+        activeTools: normalizedTools,
+        activeTool: normalizedTools[0] || null,
+      };
+    });
     const activeId = activeRaw && threads.some((t) => t.id === activeRaw) ? activeRaw : (threads[0]?.id || "");
 
     if (!threads.length) {
@@ -698,17 +849,20 @@ export default function App() {
   const [modelsLoading, setModelsLoading] = useState(true);
   const [connected, setConnected] = useState(false);
   const [activeTools, setActiveTools] = useState<string[]>([]);
+  const [reasoningByAssistantId, setReasoningByAssistantId] = useState<Record<string, ReasoningTrace>>({});
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
 
-  const [pendingImage, setPendingImage] = useState<{ name: string; dataUrl: string } | null>(null);
+  const [pendingImages, setPendingImages] = useState<PendingImageAttachment[]>([]);
   type PendingVideoConfirm = {
     prompt: string;
     imageDataUrl: string;
     duration: number;
     aspect_ratio: "16:9" | "1:1";
     resolution: "480p" | "720p";
+    provider: "xai" | "replicate";
+    model_id?: string;
   };
   const [pendingVideoConfirms, setPendingVideoConfirms] = useState<Record<string, PendingVideoConfirm>>({});
   const [imageModel, setImageModel] = useState<"seedream-4.5" | "nano-banana-pro">(() => {
@@ -720,6 +874,39 @@ export default function App() {
     }
     return "seedream-4.5";
   });
+  const [videoModel, setVideoModel] = useState<"xai-grok-imagine-video" | "replicate-grok-imagine-video">(() => {
+    try {
+      const raw = String(localStorage.getItem(STORAGE_VIDEO_MODEL) || "").trim();
+      if (raw === "xai-grok-imagine-video" || raw === "replicate-grok-imagine-video") return raw;
+    } catch {
+      // ignore
+    }
+    return "replicate-grok-imagine-video";
+  });
+  const [modelToggleCompatById, setModelToggleCompatById] = useState<Record<string, ModelToggleCompat>>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_MODEL_TOGGLE_COMPAT);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as Record<string, Partial<ModelToggleCompat>>;
+      if (!parsed || typeof parsed !== "object") return {};
+
+      const normalized: Record<string, ModelToggleCompat> = {};
+      for (const [id, value] of Object.entries(parsed)) {
+        if (!id || !value || typeof value !== "object") continue;
+        normalized[id] = {
+          deepsearch: Boolean(value.deepsearch),
+          think: Boolean(value.think),
+          combo: Boolean(value.combo),
+          verifiedAt: Number(value.verifiedAt) || Date.now(),
+        };
+      }
+      return normalized;
+    } catch {
+      return {};
+    }
+  });
+  const [modelCompatCheckingById, setModelCompatCheckingById] = useState<Record<string, boolean>>({});
+  const modelCompatInFlightRef = useRef<Set<string>>(new Set());
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const messagesRef = useRef<ChatMessage[]>(messages);
@@ -727,7 +914,7 @@ export default function App() {
     threadId: string;
     assistantId: string;
     prompt: string;
-    pendingImage?: { name: string; dataUrl: string } | null;
+    pendingImages?: PendingImageAttachment[];
     controller: AbortController;
   } | null>(null);
   const thinkingAssistantRef = useRef<string | null>(null);
@@ -740,13 +927,21 @@ export default function App() {
 
   // Persist tool selection per-thread (so "Chat" and "Midia" threads don't fight over toggles).
   useEffect(() => {
-    const tool = activeThread?.activeTool || null;
+    const tools = normalizeToolSelection(
+      coerceActiveTools(
+        activeThread?.activeTools && activeThread.activeTools.length > 0 ? activeThread.activeTools : activeThread?.activeTool
+      )
+    );
     setActiveTools((prev) => {
-      const next = tool ? [tool] : [];
-      if (prev.length === next.length && prev[0] === next[0]) return prev;
-      return next;
+      if (prev.length === tools.length && prev.every((item, idx) => item === tools[idx])) return prev;
+      return tools;
     });
   }, [activeThreadId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const max = activeTools.includes("edit-image") ? EDIT_IMAGE_MAX_ATTACHMENTS : 1;
+    setPendingImages((prev) => (prev.length <= max ? prev : prev.slice(0, max)));
+  }, [activeTools]);
 
   useEffect(() => {
     try {
@@ -774,6 +969,22 @@ export default function App() {
       // ignore
     }
   }, [imageModel]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_VIDEO_MODEL, videoModel);
+    } catch {
+      // ignore
+    }
+  }, [videoModel]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_MODEL_TOGGLE_COMPAT, JSON.stringify(modelToggleCompatById));
+    } catch {
+      // ignore
+    }
+  }, [modelToggleCompatById]);
 
   useEffect(() => {
     if (!activeThreadId && threads[0]) setActiveThreadId(threads[0].id);
@@ -855,6 +1066,14 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!connected || modelsLoading) return;
+    if (!model) return;
+    if (modelToggleCompatById[model]) return;
+    if (modelCompatInFlightRef.current.has(model)) return;
+    void runModelToggleCompatibilityCheck(model);
+  }, [connected, modelsLoading, model, modelToggleCompatById]);
+
   const canSend = useMemo(() => trimmed.length > 0 && !thinking, [trimmed, thinking]);
 
   const updateThread = (id: string, updater: (t: ChatThread) => ChatThread) => {
@@ -922,6 +1141,151 @@ export default function App() {
     }));
   };
 
+  const upsertReasoningTrace = (assistantId: string, trace: ReasoningTrace) => {
+    setReasoningByAssistantId((prev) => ({ ...prev, [assistantId]: trace }));
+  };
+
+  const patchReasoningTrace = (assistantId: string, updater: (trace: ReasoningTrace) => ReasoningTrace) => {
+    setReasoningByAssistantId((prev) => {
+      const current = prev[assistantId];
+      if (!current) return prev;
+      return { ...prev, [assistantId]: updater(current) };
+    });
+  };
+
+  const markReasoningStep = (
+    assistantId: string,
+    stepId: string,
+    status: "pending" | "active" | "done",
+    note?: string
+  ) => {
+    patchReasoningTrace(assistantId, (trace) => ({
+      ...trace,
+      steps: trace.steps.map((step) => (step.id === stepId ? { ...step, status, note } : step)),
+    }));
+  };
+
+  const setReasoningQueries = (assistantId: string, queries: string[]) => {
+    patchReasoningTrace(assistantId, (trace) => ({ ...trace, queries: queries.slice(0, 5) }));
+  };
+
+  const setReasoningOptimizedQueries = (assistantId: string, queries: string[]) => {
+    patchReasoningTrace(assistantId, (trace) => ({ ...trace, optimizedQueries: queries.slice(0, 5) }));
+  };
+
+  const setReasoningSources = (assistantId: string, sources: Array<{ title: string; url?: string }>) => {
+    patchReasoningTrace(assistantId, (trace) => ({ ...trace, sources: sources.slice(0, 8) }));
+  };
+
+  const clearReasoningTrace = (assistantId: string) => {
+    setReasoningByAssistantId((prev) => {
+      if (!prev[assistantId]) return prev;
+      const { [assistantId]: _drop, ...rest } = prev;
+      return rest;
+    });
+  };
+
+  const withTimeout = async <T,>(promise: Promise<T>, ms = 20000): Promise<T> => {
+    return await new Promise<T>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        reject(new Error("timeout"));
+      }, ms);
+
+      promise
+        .then((value) => {
+          window.clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((error) => {
+          window.clearTimeout(timer);
+          reject(error);
+        });
+    });
+  };
+
+  const readChatResponseText = async (response: unknown): Promise<string> => {
+    if (response && typeof (response as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
+      let full = "";
+      for await (const part of response as AsyncIterable<unknown>) {
+        full += extractStreamText(part);
+      }
+      return full.trim();
+    }
+    return parseNonStreamResponse(response).trim();
+  };
+
+  const runModelToggleCompatibilityCheck = async (modelId: string) => {
+    if (!window.puter || !window.puter.auth.isSignedIn()) return;
+    if (!modelId || modelCompatInFlightRef.current.has(modelId)) return;
+
+    modelCompatInFlightRef.current.add(modelId);
+    setModelCompatCheckingById((prev) => ({ ...prev, [modelId]: true }));
+
+    const sys = (content: string) => ({ role: "system" as const, content });
+    const user = (content: string) => ({ role: "user" as const, content });
+
+    let deepsearchOk = false;
+    let thinkOk = false;
+
+    try {
+      const deepPayload = [
+        sys(SYSTEM_PROMPT.trim()),
+        sys("Teste tecnico interno: DeepSearch."),
+        sys(
+          "Resultados de busca (DeepSearch):\n\n[#1] Exemplo\nURL: https://example.com\nResumo: teste de compatibilidade."
+        ),
+        user("Responda somente: OK"),
+      ];
+
+      const deepRes = await withTimeout(window.puter.ai.chat(deepPayload, { model: modelId, stream: false }), 22000);
+      deepsearchOk = (await readChatResponseText(deepRes)).length > 0;
+    } catch {
+      deepsearchOk = false;
+    }
+
+    try {
+      const planPayload = [
+        sys(SYSTEM_PROMPT.trim()),
+        sys("Teste tecnico interno: THINK 2-pass. Gere apenas um plano curto com 3 itens."),
+        user("Como melhorar foco no estudo?"),
+      ];
+      const planRes = await withTimeout(window.puter.ai.chat(planPayload, { model: modelId, stream: false }), 22000);
+      const planText = (await readChatResponseText(planRes)).slice(0, 800);
+
+      const finalPayload = [
+        sys(SYSTEM_PROMPT.trim()),
+        sys(
+          planText
+            ? `MODO THINK (2-PASS): use o plano interno e responda de forma final sem mostrar cadeia de pensamento.\n\nPLANO:\n${planText}`
+            : "MODO THINK: responda de forma curta e objetiva sem mostrar cadeia de pensamento."
+        ),
+        user("Como melhorar foco no estudo?"),
+      ];
+
+      const finalRes = await withTimeout(window.puter.ai.chat(finalPayload, { model: modelId, stream: false }), 22000);
+      thinkOk = (await readChatResponseText(finalRes)).length > 0;
+    } catch {
+      thinkOk = false;
+    }
+
+    setModelToggleCompatById((prev) => ({
+      ...prev,
+      [modelId]: {
+        deepsearch: deepsearchOk,
+        think: thinkOk,
+        combo: deepsearchOk && thinkOk,
+        verifiedAt: Date.now(),
+      },
+    }));
+
+    setModelCompatCheckingById((prev) => {
+      if (!prev[modelId]) return prev;
+      const { [modelId]: _drop, ...rest } = prev;
+      return rest;
+    });
+    modelCompatInFlightRef.current.delete(modelId);
+  };
+
   const appendToActive = (items: ChatMessage[], maybeTitle?: string) => {
     if (!activeThread) return;
     appendToThread(activeThread.id, items, maybeTitle);
@@ -978,14 +1342,33 @@ export default function App() {
   };
 
   const toggleTool = (toolId: string) => {
+    // Create Video defaults to Replicate provider.
+    if (toolId === "create-video") {
+      setVideoModel("replicate-grok-imagine-video");
+    }
+
     setActiveTools((prev) => {
-      // Exclusive mode: only 1 toggle can be active at a time.
-      // Clicking the active one toggles it off.
-      const next = prev.includes(toolId) ? [] : [toolId];
+      const current = normalizeToolSelection(prev);
+      const isActive = current.includes(toolId);
+      let next: string[];
+
+      if (isActive) {
+        next = current.filter((item) => item !== toolId);
+      } else if (MEDIA_TOOL_IDS.has(toolId)) {
+        // Media tools are exclusive.
+        next = [toolId];
+      } else if (TEXT_TOOL_IDS.has(toolId)) {
+        // Text tools can run together as DeepSearch + Think.
+        const withoutMedia = current.filter((item) => !MEDIA_TOOL_IDS.has(item));
+        next = normalizeToolSelection([...withoutMedia, toolId]);
+      } else {
+        next = normalizeToolSelection(current);
+      }
 
       if (activeThread) {
         updateThread(activeThread.id, (t) => ({
           ...t,
+          activeTools: next,
           activeTool: next[0] || null,
           updatedAt: Date.now(),
         }));
@@ -1013,7 +1396,7 @@ export default function App() {
     setActiveThreadId(t.id);
     closeSidebarOverlay();
     setInput("");
-    setPendingImage(null);
+    setPendingImages([]);
   };
 
   const renameChat = (id: string, title: string) => {
@@ -1053,8 +1436,8 @@ export default function App() {
     // Restore the prompt so the user can quickly adjust and re-send.
     setInput((cur) => (cur.trim().length > 0 ? cur : inflight.prompt));
 
-    if (inflight.pendingImage) {
-      setPendingImage((cur) => cur || inflight.pendingImage || null);
+    if (inflight.pendingImages?.length) {
+      setPendingImages((cur) => (cur.length > 0 ? cur : inflight.pendingImages || []));
     }
 
     // If we were in the middle of a video flow, clear the pending confirmation for this thread.
@@ -1078,6 +1461,7 @@ export default function App() {
         : `${currentText}\n\n---\n\n> Geracao cancelada.`;
 
     updateMessageInThread(inflight.threadId, inflight.assistantId, { text: nextText });
+    clearReasoningTrace(inflight.assistantId);
 
     setThinking(false);
     setTypingAssistantId((cur) => (cur === inflight.assistantId ? null : cur));
@@ -1103,18 +1487,15 @@ export default function App() {
     const threadMessagesSnapshot = [...activeThread.messages];
     const pendingConfirm = pendingVideoConfirms[threadId];
 
-    const attachedImageDataUrl = pendingImage?.dataUrl || null;
+    const attachedImageDataUrls = pendingImages.map((img) => img.dataUrl).filter(Boolean);
+    const attachedImageDataUrl = attachedImageDataUrls[0] || null;
 
-    const userAttachment: ChatAttachment[] = attachedImageDataUrl
-      ? [
-          {
-            id: crypto.randomUUID(),
-            kind: "image",
-            url: attachedImageDataUrl,
-            createdAt: Date.now(),
-          },
-        ]
-      : [];
+    const userAttachment: ChatAttachment[] = attachedImageDataUrls.map((url) => ({
+      id: crypto.randomUUID(),
+      kind: "image",
+      url,
+      createdAt: Date.now(),
+    }));
 
     // If we are waiting for a video confirmation, interpret the next message as the confirmation step.
     if (pendingConfirm) {
@@ -1154,7 +1535,7 @@ export default function App() {
           const { [threadId]: _d, ...rest } = prev;
           return rest;
         });
-        if (pendingImage) setPendingImage(null);
+        if (pendingImages.length) setPendingImages([]);
         return;
       }
 
@@ -1174,7 +1555,7 @@ export default function App() {
         }));
 
         // We captured the updated image already; drop it from the composer to avoid holding large data URIs.
-        if (pendingImage) setPendingImage(null);
+        if (pendingImages.length) setPendingImages([]);
       }
 
       if (!isYes(trimmed)) {
@@ -1197,7 +1578,9 @@ export default function App() {
         threadId,
         assistantId,
         prompt: pendingConfirm.prompt,
-        pendingImage: pendingImage || { name: "video-ref.jpg", dataUrl: imageToUse },
+        pendingImages: pendingImages.length
+          ? pendingImages
+          : [{ id: crypto.randomUUID(), name: "video-ref.jpg", dataUrl: imageToUse }],
         controller,
       };
       thinkingAssistantRef.current = assistantId;
@@ -1217,6 +1600,8 @@ export default function App() {
             duration: durationToUse,
             aspect_ratio: pendingConfirm.aspect_ratio,
             resolution: pendingConfirm.resolution,
+            provider: pendingConfirm.provider || "xai",
+            video_model_id: pendingConfirm.model_id || undefined,
           },
           clerkToken,
           signal
@@ -1266,6 +1651,9 @@ export default function App() {
     const wantsCreateImages = activeTools.includes("create-images");
     const wantsEditImage = activeTools.includes("edit-image");
     const wantsCreateVideo = activeTools.includes("create-video");
+    const selectedVideoProvider: "xai" | "replicate" =
+      videoModel === "replicate-grok-imagine-video" ? "replicate" : "xai";
+    const selectedVideoModelId = videoModel === "replicate-grok-imagine-video" ? "xai/grok-imagine-video" : undefined;
 
     // Create Video always asks for confirmation before consuming credits/time.
     if (wantsCreateVideo) {
@@ -1329,18 +1717,23 @@ export default function App() {
           duration,
           aspect_ratio: "16:9",
           resolution: "720p",
+          provider: selectedVideoProvider,
+          model_id: selectedVideoModelId,
         },
       }));
 
       setInput("");
-      if (pendingImage) setPendingImage(null);
+      if (pendingImages.length) setPendingImages([]);
       return;
     }
 
     const usedImageModelId = modelHint.modelId || imageModel;
     const usedImageModelLabel = usedImageModelId === "seedream-4.5" ? "Seedream 4.5" : "Nano Banana Pro";
 
-    const activeToolId = activeTools[0] || null;
+    const activeToolId =
+      activeTools.includes("deepsearch") && activeTools.includes("think")
+        ? "deepsearch+think"
+        : activeTools[0] || null;
     const assistantPlaceholderText = buildToolLoadingLabel(activeToolId, {
       imageModelLabel: usedImageModelLabel,
     });
@@ -1379,7 +1772,7 @@ export default function App() {
 
     const controller = new AbortController();
     const signal = controller.signal;
-    inflightRef.current = { threadId, assistantId, prompt: promptText, pendingImage, controller };
+    inflightRef.current = { threadId, assistantId, prompt: promptText, pendingImages, controller };
 
     const mediaJobs: Promise<void>[] = [];
 
@@ -1433,8 +1826,17 @@ export default function App() {
             const generated = createImagesPromise ? await createImagesPromise : null;
             if (signal.aborted) return;
 
-            const imageSource = attachedImageDataUrl || generated || getLatestImageUrl(threadMessagesSnapshot);
-            if (!imageSource) {
+            const latestImage = getLatestImageUrl(threadMessagesSnapshot);
+            const imageSources =
+              attachedImageDataUrls.length > 0
+                ? attachedImageDataUrls.slice(0, EDIT_IMAGE_MAX_ATTACHMENTS)
+                : generated
+                  ? [generated]
+                  : latestImage
+                    ? [latestImage]
+                    : [];
+
+            if (imageSources.length === 0) {
               appendTextToMessageInThread(
                 threadId,
                 assistantId,
@@ -1443,11 +1845,13 @@ export default function App() {
               return;
             }
 
+            const imagePayload = imageSources.length === 1 ? imageSources[0] : imageSources;
+
             const data = await apiJson<{ success: boolean; urls: string[] }>(
               "/api/image/edit",
               {
                 prompt: promptText,
-                image: imageSource,
+                image: imagePayload,
                 aspectRatio: "1:1",
               },
               clerkToken,
@@ -1479,14 +1883,16 @@ export default function App() {
       );
     }
 
-    // Clear pending image after enqueueing edit jobs (we captured data URL already).
-    if (pendingImage) setPendingImage(null);
+    // Clear pending image(s) after enqueueing jobs (we captured data URL already).
+    if (pendingImages.length) setPendingImages([]);
 
     const modelForText = models.some((m) => m.id === model) ? model : pickDefaultModelId(models);
     if (modelForText !== model) setModel(modelForText);
 
     const deepSearchEnabled = activeTools.includes("deepsearch");
     const thinkEnabled = activeTools.includes("think");
+    const reasoningTrace = createReasoningTrace(thinkEnabled, deepSearchEnabled);
+    if (reasoningTrace) upsertReasoningTrace(assistantId, reasoningTrace);
 
     const runTextJob = async () => {
       if (signal.aborted) return;
@@ -1512,31 +1918,62 @@ export default function App() {
       const preludeNotes: string[] = [];
 
       type WebSearchResult = { title: string; url: string; snippet?: string };
-      type WebSearchResponse = { success: boolean; results?: WebSearchResult[]; error?: string };
+      type WebSearchTrace = {
+        queries?: string[];
+        perQuery?: Array<{ query: string; count: number; error?: string }>;
+        total_sources?: number;
+      };
+      type WebSearchResponse = { success: boolean; results?: WebSearchResult[]; trace?: WebSearchTrace; error?: string };
 
       let deepSearchAvailable = !deepSearchEnabled;
       let searchContext = "";
 
       if (deepSearchEnabled) {
-        updateMessageInThread(threadId, assistantId, { text: buildToolLoadingLabel("deepsearch") });
+        markReasoningStep(assistantId, "analyze", "done");
+        updateMessageInThread(threadId, assistantId, {
+          text: thinkEnabled ? buildToolLoadingLabel("deepsearch+think") : buildToolLoadingLabel("deepsearch"),
+        });
         try {
+          const { searchQueries, optimizedQueries } = buildDeepSearchQueries(promptText, thinkEnabled);
+
+          if (thinkEnabled && optimizedQueries.length > 0) {
+            markReasoningStep(assistantId, "optimize", "active");
+            setReasoningOptimizedQueries(assistantId, optimizedQueries);
+            markReasoningStep(assistantId, "optimize", "done", `${optimizedQueries.length} estrategias`);
+          }
+
+          markReasoningStep(assistantId, "search", "active");
+          setReasoningQueries(assistantId, searchQueries);
+
           const data = await apiJson<WebSearchResponse>(
             "/api/web/search",
             {
               query: promptText,
-              max_results: 5,
+              queries: searchQueries,
+              max_results: 4,
             },
             clerkToken,
             signal
           );
 
+          if (Array.isArray(data.trace?.queries) && data.trace?.queries.length > 0) {
+            setReasoningQueries(assistantId, data.trace.queries);
+          }
+
           const results = Array.isArray(data.results) ? data.results : [];
           const usable = results
             .filter((r) => r && typeof r.url === "string" && r.url.startsWith("http") && typeof r.title === "string")
-            .slice(0, 5);
+            .slice(0, 8);
 
           if (usable.length > 0) {
             deepSearchAvailable = true;
+            markReasoningStep(assistantId, "search", "done");
+            markReasoningStep(assistantId, "review", "active");
+            setReasoningSources(
+              assistantId,
+              usable.map((item) => ({ title: item.title, url: item.url }))
+            );
+
             searchContext = usable
               .map((r, i) => {
                 const snip = r.snippet ? String(r.snippet).trim() : "";
@@ -1544,15 +1981,26 @@ export default function App() {
                 return `[#${i + 1}] ${r.title}\nURL: ${r.url}${short ? `\nResumo: ${short}` : ""}`;
               })
               .join("\n\n");
+
+            markReasoningStep(assistantId, "review", "done", `${usable.length} fontes relevantes`);
           } else {
             deepSearchAvailable = false;
+            markReasoningStep(assistantId, "search", "done", "Nenhuma fonte encontrada");
+            markReasoningStep(assistantId, "review", "done", "Sem fontes para revisar");
             preludeNotes.push("Aviso: DeepSearch nao retornou resultados nesta tentativa. Respondendo sem fontes.");
           }
         } catch (e) {
           if (isAbortError(e) || signal.aborted) return;
           deepSearchAvailable = false;
+          if (thinkEnabled) {
+            markReasoningStep(assistantId, "optimize", "done", "Fallback de pesquisa");
+          }
+          markReasoningStep(assistantId, "search", "done", "Falha na busca");
+          markReasoningStep(assistantId, "review", "done", "Busca indisponivel");
           preludeNotes.push("Aviso: DeepSearch falhou nesta tentativa. Respondendo sem fontes.");
         }
+      } else {
+        markReasoningStep(assistantId, "analyze", "done");
       }
 
       const prelude = preludeNotes.length > 0 ? `${preludeNotes.join("\n\n")}\n\n---\n\n` : "";
@@ -1607,8 +2055,30 @@ export default function App() {
       ) => {
         if (signal.aborted) return "";
 
+        const runPuterChatSafe = async (chatMessages: PuterChatMessage[], chatOptions: Record<string, unknown>) => {
+          try {
+            return await puter.ai.chat(chatMessages, { ...chatOptions, signal });
+          } catch (error) {
+            const msg = getErrorMessage(error).toLowerCase();
+            const hasReasoningEffort = Object.prototype.hasOwnProperty.call(chatOptions, "reasoning_effort");
+            const unsupportedReasoning =
+              msg.includes("reasoning_effort") ||
+              msg.includes("unknown parameter") ||
+              msg.includes("unsupported parameter") ||
+              msg.includes("unexpected property") ||
+              msg.includes("invalid_request");
+
+            if (hasReasoningEffort && unsupportedReasoning) {
+              const { reasoning_effort: _drop, ...fallbackOptions } = chatOptions;
+              return await puter.ai.chat(chatMessages, { ...fallbackOptions, signal });
+            }
+
+            throw error;
+          }
+        };
+
         // Note: Puter SDK may ignore `signal`, but we still use it to stop consuming streams + UI updates.
-        const response = await puter.ai.chat(messages, { ...options, signal });
+        const response = await runPuterChatSafe(messages, options);
         let fullText = "";
         let clearedTyping = false;
 
@@ -1642,7 +2112,7 @@ export default function App() {
         // or a stream that doesn't yield text chunks. Try a safe fallback.
         if (!fullText.trim() && options.stream === true) {
           try {
-            const fallbackResponse = await puter.ai.chat(messages, { ...options, stream: false, signal });
+            const fallbackResponse = await runPuterChatSafe(messages, { ...options, stream: false });
             const fallbackText = parseNonStreamResponse(fallbackResponse);
             if (fallbackText.trim()) {
               fullText = fallbackText;
@@ -1668,6 +2138,8 @@ export default function App() {
 
         // Think = 2-pass (plan hidden) using the SAME Puter model selected by the user.
         if (thinkEnabled) {
+          markReasoningStep(assistantId, "plan", "active");
+
           const planInstruction = [
             "MODO THINK (PLANO OCULTO).",
             "Gere um plano curto (max 8 itens) para responder a ultima pergunta do usuario.",
@@ -1692,6 +2164,9 @@ export default function App() {
           } catch {
             planText = "";
           }
+
+          markReasoningStep(assistantId, "plan", "done", planText ? "Plano interno estruturado" : "Plano resumido");
+          markReasoningStep(assistantId, "answer", "active");
 
           // Defensive: if a model ignores the instruction and outputs a full answer, clamp it.
           if (planText.length > 1600) planText = `${planText.slice(0, 1600)}...`;
@@ -1728,16 +2203,19 @@ export default function App() {
             fullText.trim() ||
             "O modelo nao retornou texto nesta tentativa. Tente novamente ou troque o modelo em Settings.";
           updateMessageInThread(threadId, assistantId, { text: `${prelude}${finalText}` });
+          markReasoningStep(assistantId, "answer", "done");
           return;
         }
 
         // Normal (single pass)
+        markReasoningStep(assistantId, "answer", "active");
         const fullText = await runChatWithPayload(payload, finalChatOptions, true);
         if (signal.aborted) return;
         const finalText =
           fullText.trim() ||
           "O modelo nao retornou texto nesta tentativa. Tente novamente ou troque o modelo em Settings.";
         updateMessageInThread(threadId, assistantId, { text: `${prelude}${finalText}` });
+        markReasoningStep(assistantId, "answer", "done");
       } catch (error) {
         if (isAbortError(error) || signal.aborted) return;
 
@@ -1781,7 +2259,18 @@ export default function App() {
 
           if (canSwitchModel && economyModel) {
             setModel(economyModel.id);
-            setActiveTools((prev) => prev.filter((item) => item !== "deepsearch" && item !== "think"));
+            setActiveTools((prev) => {
+              const next = prev.filter((item) => item !== "deepsearch" && item !== "think");
+              if (activeThread) {
+                updateThread(activeThread.id, (t) => ({
+                  ...t,
+                  activeTools: next,
+                  activeTool: next[0] || null,
+                  updatedAt: Date.now(),
+                }));
+              }
+              return next;
+            });
           }
 
           const suggestion =
@@ -1823,6 +2312,7 @@ export default function App() {
       setThinking(false);
       setTypingAssistantId((cur) => (cur === assistantId ? null : cur));
     }
+    clearReasoningTrace(assistantId);
   };
 
   return (
@@ -1838,9 +2328,13 @@ export default function App() {
             models={models}
             modelsLoading={modelsLoading}
             onModelChange={setModel}
+            modelToggleCompatById={modelToggleCompatById}
+            modelCompatCheckingById={modelCompatCheckingById}
             activeTools={activeTools}
             imageModel={imageModel}
             onImageModelChange={setImageModel}
+            videoModel={videoModel}
+            onVideoModelChange={setVideoModel}
             connected={connected}
             onNewChat={() => createNewChat("chat")}
             onNewMediaChat={() => createNewChat("media")}
@@ -1885,6 +2379,7 @@ export default function App() {
                       key={message.id}
                       message={message}
                       typing={message.role === "assistant" && message.id === typingAssistantId}
+                      reasoningTrace={message.role === "assistant" ? reasoningByAssistantId[message.id] : undefined}
                       onOpenImage={(url) => {
                         setLightboxUrl(url);
                       }}
@@ -1911,7 +2406,22 @@ export default function App() {
                   const dataUrl = await fileToDataUrl(file);
                   const ext = String(file.type || "image/png").split("/")[1] || "png";
                   const safeName = file.name && file.name.trim() ? file.name : `pasted-image.${ext}`;
-                  setPendingImage({ name: safeName, dataUrl });
+                  const nextItem: PendingImageAttachment = {
+                    id: crypto.randomUUID(),
+                    name: safeName,
+                    dataUrl,
+                  };
+
+                  setPendingImages((prev) => {
+                    const max = activeTools.includes("edit-image") ? EDIT_IMAGE_MAX_ATTACHMENTS : 1;
+                    if (max <= 1) return [nextItem];
+
+                    const base = prev.slice(0, EDIT_IMAGE_MAX_ATTACHMENTS);
+                    if (base.length >= EDIT_IMAGE_MAX_ATTACHMENTS) {
+                      return [...base.slice(1), nextItem];
+                    }
+                    return [...base, nextItem];
+                  });
                 } catch (e) {
                   appendToActive([
                     {
@@ -1924,9 +2434,10 @@ export default function App() {
                 }
               })();
             }}
-            attachedImageName={pendingImage?.name || null}
-            attachedImagePreviewUrl={pendingImage?.dataUrl || null}
-            onClearAttachment={() => setPendingImage(null)}
+            attachedImages={pendingImages.map((img) => ({ id: img.id, name: img.name, previewUrl: img.dataUrl }))}
+            onRemoveAttachment={(id) => {
+              setPendingImages((prev) => prev.filter((img) => img.id !== id));
+            }}
           />
 
           <Lightbox

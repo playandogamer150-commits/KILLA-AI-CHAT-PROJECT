@@ -3,15 +3,26 @@ import { UserButton } from "@clerk/clerk-react";
 import type { ModelOption } from "../types";
 import logoUrl from "../assets/killa-logo.svg";
 
+type ModelToggleCompat = {
+  deepsearch: boolean;
+  think: boolean;
+  combo: boolean;
+  verifiedAt: number;
+};
+
 type TopBarProps = {
   model: string;
   models: ModelOption[];
   modelsLoading: boolean;
   onModelChange: (value: string) => void;
+  modelToggleCompatById: Record<string, ModelToggleCompat>;
+  modelCompatCheckingById: Record<string, boolean>;
 
   activeTools: string[];
   imageModel: "seedream-4.5" | "nano-banana-pro";
   onImageModelChange: (value: "seedream-4.5" | "nano-banana-pro") => void;
+  videoModel: "xai-grok-imagine-video" | "replicate-grok-imagine-video";
+  onVideoModelChange: (value: "xai-grok-imagine-video" | "replicate-grok-imagine-video") => void;
 
   connected: boolean;
   onConnectClick: () => void;
@@ -71,6 +82,8 @@ function ModelDropdown({
   models,
   loading,
   onChange,
+  modelToggleCompatById,
+  modelCompatCheckingById,
   buttonTitle,
   buttonSubtitle,
   buttonClassName,
@@ -79,6 +92,8 @@ function ModelDropdown({
   models: ModelOption[];
   loading: boolean;
   onChange: (id: string) => void;
+  modelToggleCompatById: Record<string, ModelToggleCompat>;
+  modelCompatCheckingById: Record<string, boolean>;
   buttonTitle?: string;
   buttonSubtitle?: string;
   buttonClassName?: string;
@@ -168,6 +183,8 @@ function ModelDropdown({
             ) : (
               filtered.map((m) => {
                 const isActive = m.id === value;
+                const compat = modelToggleCompatById[m.id];
+                const checking = Boolean(modelCompatCheckingById[m.id]);
                 return (
                   <button
                     key={m.id}
@@ -188,6 +205,12 @@ function ModelDropdown({
                       <span className="sep">|</span>
                       <span className="mono">{m.id}</span>
                     </div>
+                    <div className="model-dd-opt-badges">
+                      {compat?.deepsearch ? <span className="model-dd-badge">DeepSearch</span> : null}
+                      {compat?.think ? <span className="model-dd-badge">Think</span> : null}
+                      {compat?.combo ? <span className="model-dd-badge">DeepSearch+Think</span> : null}
+                      {checking ? <span className="model-dd-badge checking">Verificando...</span> : null}
+                    </div>
                   </button>
                 );
               })
@@ -204,11 +227,15 @@ function MediaDropdown({
   subtitle,
   imageModel,
   onImageModelChange,
+  videoModel,
+  onVideoModelChange,
 }: {
   title: string;
   subtitle: string;
   imageModel: "seedream-4.5" | "nano-banana-pro";
   onImageModelChange: (value: "seedream-4.5" | "nano-banana-pro") => void;
+  videoModel: "xai-grok-imagine-video" | "replicate-grok-imagine-video";
+  onVideoModelChange: (value: "xai-grok-imagine-video" | "replicate-grok-imagine-video") => void;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
@@ -303,12 +330,41 @@ function MediaDropdown({
             </button>
 
             <div className="model-dd-group-title">Create Video</div>
-            <button type="button" className="model-dd-opt disabled" disabled>
+            <button
+              type="button"
+              className={`model-dd-opt ${videoModel === "xai-grok-imagine-video" ? "active" : ""}`}
+              role="option"
+              aria-selected={videoModel === "xai-grok-imagine-video"}
+              onClick={() => {
+                onVideoModelChange("xai-grok-imagine-video");
+                setOpen(false);
+                buttonRef.current?.focus();
+              }}
+            >
               <div className="model-dd-opt-title">Grok Imagine Video</div>
               <div className="model-dd-opt-sub">
                 <span>xAI</span>
                 <span className="sep">|</span>
                 <span className="mono">grok-imagine-video</span>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              className={`model-dd-opt ${videoModel === "replicate-grok-imagine-video" ? "active" : ""}`}
+              role="option"
+              aria-selected={videoModel === "replicate-grok-imagine-video"}
+              onClick={() => {
+                onVideoModelChange("replicate-grok-imagine-video");
+                setOpen(false);
+                buttonRef.current?.focus();
+              }}
+            >
+              <div className="model-dd-opt-title">Grok Imagine Video (Replicate)</div>
+              <div className="model-dd-opt-sub">
+                <span>Replicate</span>
+                <span className="sep">|</span>
+                <span className="mono">xai/grok-imagine-video</span>
               </div>
             </button>
           </div>
@@ -323,9 +379,13 @@ export default function TopBar({
   models,
   modelsLoading,
   onModelChange,
+  modelToggleCompatById,
+  modelCompatCheckingById,
   activeTools,
   imageModel,
   onImageModelChange,
+  videoModel,
+  onVideoModelChange,
   connected,
   onConnectClick,
   onDisconnectClick,
@@ -349,7 +409,9 @@ export default function TopBar({
       : "Killa Model Media";
 
   const mediaSubtitle = activeTools.includes("create-video")
-    ? "Grok Imagine Video"
+    ? videoModel === "replicate-grok-imagine-video"
+      ? "Grok Imagine Video (Replicate)"
+      : "Grok Imagine Video (xAI)"
     : activeTools.includes("edit-image")
       ? "Grok Imagine Image Edit"
       : imageSubtitle;
@@ -383,6 +445,8 @@ export default function TopBar({
           models={models}
           loading={modelsLoading}
           onChange={onModelChange}
+          modelToggleCompatById={modelToggleCompatById}
+          modelCompatCheckingById={modelCompatCheckingById}
           buttonTitle="Killa Model Chat"
           buttonSubtitle={textSubtitle}
           buttonClassName="tall"
@@ -393,6 +457,8 @@ export default function TopBar({
           subtitle={mediaSubtitle}
           imageModel={imageModel}
           onImageModelChange={onImageModelChange}
+          videoModel={videoModel}
+          onVideoModelChange={onVideoModelChange}
         />
       </div>
 

@@ -1,5 +1,8 @@
+import { modelslabBase64ToUrl } from "./modelslab.js";
+
 const REPLICATE_API_BASE = "https://api.replicate.com/v1";
 const DEFAULT_REPLICATE_MODEL = "stability-ai/sdxl";
+const DEFAULT_REPLICATE_VIDEO_MODEL = "xai/grok-imagine-video";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -56,12 +59,13 @@ async function safeJson(res) {
   }
 }
 
-function getReplicateHeaders(token) {
-  return {
+function getReplicateHeaders(token, wait = true) {
+  const headers = {
     Authorization: `Token ${token}`,
     "Content-Type": "application/json",
-    Prefer: "wait",
   };
+  if (wait) headers.Prefer = "wait";
+  return headers;
 }
 
 export function getReplicateToken() {
@@ -71,6 +75,11 @@ export function getReplicateToken() {
 export function getReplicateModelId() {
   const env = String(process.env.REPLICATE_IMAGE_MODEL_ID || "").trim();
   return env || DEFAULT_REPLICATE_MODEL;
+}
+
+export function getReplicateVideoModelId() {
+  const env = String(process.env.REPLICATE_VIDEO_MODEL_ID || "").trim();
+  return env || DEFAULT_REPLICATE_VIDEO_MODEL;
 }
 
 export async function replicateTextToImage({ prompt, aspectRatio = "1:1", modelId, negativePrompt }) {
@@ -256,3 +265,155 @@ export async function replicateTextToImage({ prompt, aspectRatio = "1:1", modelI
   }
 }
 
+function extractFirstUriFromOutput(output) {
+  if (!output) return "";
+  if (typeof output === "string" && /^https?:\/\//i.test(output)) return output;
+  if (Array.isArray(output)) {
+    const first = output.find((item) => typeof item === "string" && /^https?:\/\//i.test(item));
+    return typeof first === "string" ? first : "";
+  }
+  if (typeof output === "object") {
+    const values = Object.values(output);
+    const first = values.find((item) => typeof item === "string" && /^https?:\/\//i.test(item));
+    return typeof first === "string" ? first : "";
+  }
+  return "";
+}
+
+function normalizeVideoDuration(duration) {
+  return Math.min(Math.max(Number(duration) || 10, 1), 15);
+}
+
+function normalizeVideoResolution(resolution) {
+  const raw = String(resolution || "").trim().toLowerCase();
+  return raw === "480p" ? "480p" : "720p";
+}
+
+function normalizeVideoAspectRatio(aspectRatio) {
+  const raw = String(aspectRatio || "").trim();
+  return /^\d+:\d+$/.test(raw) ? raw : "16:9";
+}
+
+export async function replicateGenerateVideo({
+  prompt,
+  imageUrl,
+  duration = 10,
+  aspect_ratio = "16:9",
+  resolution = "720p",
+  modelId,
+}) {
+  const token = getReplicateToken();
+  if (!token) {
+    return { success: false, error: "REPLICATE_API_TOKEN is not set." };
+  }
+
+  const cleanPrompt = sanitizePrompt(prompt);
+  if (!cleanPrompt) {
+    return { success: false, error: "Prompt is required." };
+  }
+
+  let resolvedImageUrl = String(imageUrl || "").trim();
+  if (resolvedImageUrl.startsWith("data:")) {
+    try {
+      resolvedImageUrl = await modelslabBase64ToUrl(resolvedImageUrl);
+    } catch {
+      // keep original if conversion fails; provider may still reject gracefully.
+    }
+  }
+
+  const model = String(modelId || getReplicateVideoModelId()).trim();
+  const modelRes = await fetch(`${REPLICATE_API_BASE}/models/${encodeURIComponent(model)}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Token ${token}`,
+    },
+    signal: AbortSignal.timeout?.(30000),
+  });
+
+  const parsedModel = await safeJson(modelRes);
+  if (!modelRes.ok || !parsedModel.ok) {
+    return { success: false, error: `Replicate model lookup failed (HTTP ${modelRes.status}).` };
+  }
+
+  const version = parsedModel.data?.latest_version?.id;
+  if (!version || typeof version !== "string") {
+    return { success: false, error: "Replicate model has no latest_version id." };
+  }
+
+  const input = {
+    prompt: cleanPrompt,
+    image: resolvedImageUrl || undefined,
+    duration: normalizeVideoDuration(duration),
+    aspect_ratio: normalizeVideoAspectRatio(aspect_ratio),
+    resolution: normalizeVideoResolution(resolution),
+  };
+
+  const createRes = await fetch(`${REPLICATE_API_BASE}/predictions`, {
+    method: "POST",
+    headers: getReplicateHeaders(token, false),
+    body: JSON.stringify({
+      version,
+      input,
+    }),
+    signal: AbortSignal.timeout?.(120000),
+  });
+
+  const createParsed = await safeJson(createRes);
+  if (!createRes.ok || !createParsed.ok) {
+    const errText = createParsed.data?.detail || createParsed.text || `HTTP ${createRes.status}`;
+    return { success: false, error: `Replicate create failed: ${String(errText).slice(0, 240)}` };
+  }
+
+  const prediction = createParsed.data || {};
+  const predictionId = String(prediction?.id || "").trim();
+  if (!predictionId) {
+    return { success: false, error: "Replicate returned no prediction id." };
+  }
+
+  const immediateVideo = extractFirstUriFromOutput(prediction?.output);
+  return {
+    success: true,
+    request_id: `replicate:${predictionId}`,
+    video_url: immediateVideo || undefined,
+  };
+}
+
+export async function replicateVideoStatus({ requestId }) {
+  const token = getReplicateToken();
+  if (!token) {
+    return { status: "error", error: "REPLICATE_API_TOKEN is not set." };
+  }
+
+  const raw = String(requestId || "").trim();
+  const predictionId = raw.startsWith("replicate:") ? raw.slice("replicate:".length) : raw;
+  if (!predictionId) return { status: "error", error: "Missing request id." };
+
+  const pollRes = await fetch(`${REPLICATE_API_BASE}/predictions/${encodeURIComponent(predictionId)}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Token ${token}`,
+    },
+    signal: AbortSignal.timeout?.(30000),
+  });
+
+  const pollParsed = await safeJson(pollRes);
+  if (!pollRes.ok || !pollParsed.ok) {
+    return { status: "error", error: `Replicate status failed (HTTP ${pollRes.status}).` };
+  }
+
+  const prediction = pollParsed.data || {};
+  const status = String(prediction?.status || "").toLowerCase();
+
+  if (status === "succeeded") {
+    const url = extractFirstUriFromOutput(prediction?.output);
+    if (!url) return { status: "error", error: "Replicate succeeded but returned no video URL." };
+    return { status: "done", video: { url } };
+  }
+
+  if (status === "failed" || status === "canceled" || status === "cancelled") {
+    const err = prediction?.error || prediction?.detail || "Replicate generation failed.";
+    return { status: "error", error: String(err) };
+  }
+
+  return { status: "pending" };
+}

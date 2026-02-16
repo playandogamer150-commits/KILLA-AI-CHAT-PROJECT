@@ -4,7 +4,7 @@ import express from "express";
 import { clerkMiddleware, getAuth } from "@clerk/express";
 
 import { modelslabImageToImage, modelslabTextToImage } from "./providers/modelslab.js";
-import { getReplicateToken, replicateTextToImage } from "./providers/replicate.js";
+import { getReplicateToken, replicateGenerateVideo, replicateTextToImage, replicateVideoStatus } from "./providers/replicate.js";
 import { getXaiKey, xaiGenerateVideo, xaiVideoStatus } from "./providers/xai.js";
 
 const PORT = Number(process.env.PORT || 8787);
@@ -144,16 +144,59 @@ app.get("/api/health", (_req, res) => {
 
 app.post("/api/web/search", requireClerkAuth, async (req, res) => {
   try {
-    const { query, max_results, params, mode } = req.body || {};
+    const { query, queries, max_results, params, mode } = req.body || {};
     const q = String(query || "").trim();
-    if (!q) {
+    const list = Array.isArray(queries)
+      ? queries
+          .map((item) => String(item || "").trim())
+          .filter(Boolean)
+          .slice(0, 5)
+      : [];
+
+    if (q && !list.includes(q)) list.unshift(q);
+    const queryList = list.filter(Boolean);
+
+    if (!queryList.length) {
       res.status(400).json({ success: false, error: "query is required." });
       return;
     }
 
     const max = Math.min(Math.max(Number(max_results) || 5, 1), 8);
-    const results = await serpApiMcpSearch(q, max, { params, mode });
-    res.json({ success: true, results });
+    const merged = [];
+    const seen = new Set();
+    const perQuery = [];
+
+    for (const item of queryList) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const results = await serpApiMcpSearch(item, max, { params, mode });
+        perQuery.push({ query: item, count: results.length });
+        for (const result of results) {
+          const key = String(result.url || "");
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          merged.push(result);
+        }
+      } catch (error) {
+        perQuery.push({
+          query: item,
+          count: 0,
+          error: error instanceof Error ? error.message : "search failed",
+        });
+      }
+    }
+
+    const limited = merged.slice(0, Math.max(max, 12));
+
+    res.json({
+      success: true,
+      results: limited,
+      trace: {
+        queries: queryList,
+        perQuery,
+        total_sources: limited.length,
+      },
+    });
   } catch (e) {
     res.status(502).json({ success: false, error: e instanceof Error ? e.message : "Web search failed." });
   }
@@ -278,12 +321,22 @@ app.post("/api/image/edit", requireClerkAuth, async (req, res) => {
       res.status(400).json({ success: false, error: "Prompt is required." });
       return;
     }
-    if (!image || typeof image !== "string") {
-      res.status(400).json({ success: false, error: "Image is required (data URI or URL)." });
+    const imageInputs = Array.isArray(image)
+      ? image.filter((item) => typeof item === "string" && item.trim()).slice(0, 2)
+      : typeof image === "string" && image.trim()
+        ? [image]
+        : [];
+
+    if (imageInputs.length === 0) {
+      res.status(400).json({ success: false, error: "Image is required (data URI/URL ou array)." });
       return;
     }
 
-    const result = await modelslabImageToImage({ prompt, image, aspectRatio: aspectRatio || "1:1" });
+    const result = await modelslabImageToImage({
+      prompt,
+      image: imageInputs.length === 1 ? imageInputs[0] : imageInputs,
+      aspectRatio: aspectRatio || "1:1",
+    });
     if (!result.success) {
       const status = result.errorCode === "CONTENT_BLOCKED" ? 422 : 502;
       res.status(status).json({ success: false, ...result });
@@ -302,7 +355,7 @@ app.post("/api/image/edit", requireClerkAuth, async (req, res) => {
 
 app.post("/api/video/generate", requireClerkAuth, async (req, res) => {
   try {
-    const { prompt, image_url, image, duration, aspect_ratio, resolution } = req.body || {};
+    const { prompt, image_url, image, duration, aspect_ratio, resolution, provider, video_model_id } = req.body || {};
     if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
       res.status(400).json({ success: false, error: "Prompt is required." });
       return;
@@ -313,20 +366,30 @@ app.post("/api/video/generate", requireClerkAuth, async (req, res) => {
       return;
     }
 
-    const result = await xaiGenerateVideo({
-      prompt,
-      imageUrl: imageSource,
-      duration,
-      aspect_ratio,
-      resolution,
-    });
+    const useReplicate = String(provider || "").trim().toLowerCase() === "replicate";
+    const result = useReplicate
+      ? await replicateGenerateVideo({
+          prompt,
+          imageUrl: imageSource,
+          duration,
+          aspect_ratio,
+          resolution,
+          modelId: video_model_id,
+        })
+      : await xaiGenerateVideo({
+          prompt,
+          imageUrl: imageSource,
+          duration,
+          aspect_ratio,
+          resolution,
+        });
 
     if (!result.success) {
       res.status(502).json(result);
       return;
     }
 
-    res.json(result);
+    res.json({ ...result, provider: useReplicate ? "replicate" : "xai" });
   } catch {
     res.status(500).json({ success: false, error: "Video generation failed." });
   }
@@ -347,7 +410,9 @@ app.get("/api/video/status/:requestId", requireClerkAuth, async (req, res) => {
       return;
     }
 
-    const status = await xaiVideoStatus({ requestId });
+    const status = String(requestId).startsWith("replicate:")
+      ? await replicateVideoStatus({ requestId })
+      : await xaiVideoStatus({ requestId });
     res.json(status);
   } catch {
     res.status(500).json({ status: "error", error: "Failed to check status." });

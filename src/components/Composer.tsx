@@ -11,9 +11,8 @@ type ComposerProps = {
   activeTools: string[];
   onToolToggle: (toolId: string) => void;
   onPickImage: (file: File) => void;
-  attachedImageName: string | null;
-  attachedImagePreviewUrl: string | null;
-  onClearAttachment: () => void;
+  attachedImages: Array<{ id: string; name: string; previewUrl: string | null }>;
+  onRemoveAttachment: (id: string) => void;
 };
 
 function ToolSearchIcon() {
@@ -182,9 +181,8 @@ export default function Composer({
   activeTools,
   onToolToggle,
   onPickImage,
-  attachedImageName,
-  attachedImagePreviewUrl,
-  onClearAttachment,
+  attachedImages,
+  onRemoveAttachment,
 }: ComposerProps) {
   const canSend = value.trim().length > 0 && !disabled;
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -284,16 +282,25 @@ export default function Composer({
   return (
     <footer className="composer-shell">
       <div className="composer-inner">
-        {attachedImageName ? (
-          <div className="attachment-chip" role="status" aria-label={`Imagem anexada: ${attachedImageName}`}>
-            {attachedImagePreviewUrl ? (
-              <img className="attachment-chip-thumb" src={attachedImagePreviewUrl} alt="" aria-hidden="true" />
-            ) : (
-              <span className="attachment-chip-thumb fallback" aria-hidden="true" />
-            )}
-            <button type="button" className="attachment-chip-clear" onClick={onClearAttachment} aria-label="Remove image">
-              <XIcon />
-            </button>
+        {attachedImages.length > 0 ? (
+          <div className="attachment-chips" role="status" aria-label="Imagens anexadas">
+            {attachedImages.map((attachment) => (
+              <div key={attachment.id} className="attachment-chip" aria-label={`Imagem anexada: ${attachment.name}`}>
+                {attachment.previewUrl ? (
+                  <img className="attachment-chip-thumb" src={attachment.previewUrl} alt="" aria-hidden="true" />
+                ) : (
+                  <span className="attachment-chip-thumb fallback" aria-hidden="true" />
+                )}
+                <button
+                  type="button"
+                  className="attachment-chip-clear"
+                  onClick={() => onRemoveAttachment(attachment.id)}
+                  aria-label="Remover imagem"
+                >
+                  <XIcon />
+                </button>
+              </div>
+            ))}
           </div>
         ) : null}
 
@@ -318,10 +325,11 @@ export default function Composer({
             ref={fileRef}
             type="file"
             accept="image/*"
+            multiple={activeTools.includes("edit-image")}
             style={{ display: "none" }}
             onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) onPickImage(file);
+              const files = Array.from(event.target.files || []);
+              for (const file of files) onPickImage(file);
               // allow re-selecting the same file
               event.currentTarget.value = "";
             }}
