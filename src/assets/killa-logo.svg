@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="KILLA mark">
+  <!-- Minimal black/white dagger mark (white strokes on transparent). -->
+  <path
+    d="M32 6 L42 26 L36 30 L36 56 L28 56 L28 30 L22 26 Z"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="3.6"
+    stroke-linejoin="round"
+  />
+  <path d="M22 26 H42" fill="none" stroke="#ffffff" stroke-width="3.6" stroke-linecap="round" />
+  <path d="M32 30 V56" fill="none" stroke="#ffffff" stroke-width="3.6" stroke-linecap="round" />
+</svg>
