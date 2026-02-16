@@ -362,7 +362,7 @@ app.post("/api/video/generate", requireClerkAuth, async (req, res) => {
     }
     const imageSource = image_url || image;
     if (!imageSource || typeof imageSource !== "string") {
-      res.status(400).json({ success: false, error: "image_url is required." });
+      res.status(400).json({ success: false, error: "image_url (ou image) is required." });
       return;
     }
 

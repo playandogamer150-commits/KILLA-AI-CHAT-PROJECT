@@ -3,6 +3,8 @@ import { modelslabBase64ToUrl } from "./modelslab.js";
 const REPLICATE_API_BASE = "https://api.replicate.com/v1";
 const DEFAULT_REPLICATE_MODEL = "stability-ai/sdxl";
 const DEFAULT_REPLICATE_VIDEO_MODEL = "xai/grok-imagine-video";
+const VIDEO_ASPECT_RATIO_ALLOWED = new Set(["16:9", "4:3", "1:1", "9:16", "3:4", "3:2", "2:3"]);
+const VIDEO_RESOLUTION_ALLOWED = new Set(["720p", "480p"]);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -286,12 +288,55 @@ function normalizeVideoDuration(duration) {
 
 function normalizeVideoResolution(resolution) {
   const raw = String(resolution || "").trim().toLowerCase();
-  return raw === "480p" ? "480p" : "720p";
+  return VIDEO_RESOLUTION_ALLOWED.has(raw) ? raw : "720p";
 }
 
 function normalizeVideoAspectRatio(aspectRatio) {
   const raw = String(aspectRatio || "").trim();
-  return /^\d+:\d+$/.test(raw) ? raw : "16:9";
+  return VIDEO_ASPECT_RATIO_ALLOWED.has(raw) ? raw : "16:9";
+}
+
+function extensionFromMime(mimeType) {
+  const lower = String(mimeType || "").toLowerCase();
+  if (lower.includes("jpeg") || lower.includes("jpg")) return "jpg";
+  if (lower.includes("png")) return "png";
+  if (lower.includes("webp")) return "webp";
+  return "bin";
+}
+
+async function replicateDataUriToFileUrl(dataUri, token) {
+  // Use Replicate native file upload to keep image fidelity close to Playground behavior.
+  const fileRes = await fetch(String(dataUri || ""), {
+    method: "GET",
+    signal: AbortSignal.timeout?.(30000),
+  });
+  if (!fileRes.ok) throw new Error(`Replicate data URI decode failed (HTTP ${fileRes.status}).`);
+
+  const blob = await fileRes.blob();
+  const ext = extensionFromMime(blob.type);
+
+  const form = new FormData();
+  form.append("content", blob, `input.${ext}`);
+
+  const uploadRes = await fetch(`${REPLICATE_API_BASE}/files`, {
+    method: "POST",
+    headers: {
+      Authorization: `Token ${token}`,
+    },
+    body: form,
+    signal: AbortSignal.timeout?.(45000),
+  });
+
+  const parsed = await safeJson(uploadRes);
+  if (!uploadRes.ok || !parsed.ok) {
+    throw new Error(`Replicate file upload failed (HTTP ${uploadRes.status}).`);
+  }
+
+  const fileUrl = parsed.data?.urls?.get;
+  if (!fileUrl || typeof fileUrl !== "string") {
+    throw new Error("Replicate file upload returned no file URL.");
+  }
+  return fileUrl;
 }
 
 export async function replicateGenerateVideo({
@@ -315,9 +360,14 @@ export async function replicateGenerateVideo({
   let resolvedImageUrl = String(imageUrl || "").trim();
   if (resolvedImageUrl.startsWith("data:")) {
     try {
-      resolvedImageUrl = await modelslabBase64ToUrl(resolvedImageUrl);
+      resolvedImageUrl = await replicateDataUriToFileUrl(resolvedImageUrl, token);
     } catch {
-      // keep original if conversion fails; provider may still reject gracefully.
+      // Fallback path to preserve compatibility if Replicate upload fails.
+      try {
+        resolvedImageUrl = await modelslabBase64ToUrl(resolvedImageUrl);
+      } catch {
+        // keep original if conversion fails; provider may still reject gracefully.
+      }
     }
   }
 

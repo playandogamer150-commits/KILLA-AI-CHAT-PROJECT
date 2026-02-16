@@ -18,6 +18,10 @@ const LEGACY_UNTITLED_MEDIA_TITLE = "New media";
 const EDIT_IMAGE_MAX_ATTACHMENTS = 2;
 const TEXT_TOOL_IDS = new Set(["deepsearch", "think"]);
 const MEDIA_TOOL_IDS = new Set(["create-images", "edit-image", "create-video"]);
+const VIDEO_ASPECT_RATIOS = ["16:9", "4:3", "1:1", "9:16", "3:4", "3:2", "2:3"] as const;
+const VIDEO_RESOLUTIONS = ["720p", "480p"] as const;
+type VideoAspectRatio = (typeof VIDEO_ASPECT_RATIOS)[number];
+type VideoResolution = (typeof VIDEO_RESOLUTIONS)[number];
 
 type PendingImageAttachment = {
   id: string;
@@ -591,6 +595,57 @@ function parseRequestedVideoDurationSeconds(text: string): number | null {
   return Math.round(n);
 }
 
+function parseRequestedVideoAspectRatio(text: string): {
+  value: VideoAspectRatio | null;
+  requested: string | null;
+} {
+  const t = String(text || "").toLowerCase();
+
+  const direct = t.match(/\b(16:9|4:3|1:1|9:16|3:4|3:2|2:3)\b/);
+  if (direct?.[1]) {
+    return { value: direct[1] as VideoAspectRatio, requested: direct[1] };
+  }
+
+  const generic = t.match(/\b(\d{1,2})\s*[:x/]\s*(\d{1,2})\b/);
+  if (generic?.[1] && generic?.[2]) {
+    const candidate = `${Number(generic[1])}:${Number(generic[2])}`;
+    if ((VIDEO_ASPECT_RATIOS as readonly string[]).includes(candidate)) {
+      return { value: candidate as VideoAspectRatio, requested: candidate };
+    }
+    return { value: null, requested: candidate };
+  }
+
+  if (/\b(vertical|portrait|retrato|verticalmente)\b/.test(t)) return { value: "9:16", requested: "9:16" };
+  if (/\b(horizontal|landscape|paisagem|widescreen)\b/.test(t)) return { value: "16:9", requested: "16:9" };
+  if (/\b(square|quadrado)\b/.test(t)) return { value: "1:1", requested: "1:1" };
+
+  return { value: null, requested: null };
+}
+
+function parseRequestedVideoResolution(text: string): {
+  value: VideoResolution | null;
+  requested: string | null;
+} {
+  const t = String(text || "").toLowerCase();
+
+  const direct = t.match(/\b(720p|480p)\b/);
+  if (direct?.[1]) return { value: direct[1] as VideoResolution, requested: direct[1] };
+
+  const generic = t.match(/\b(\d{3,4})p\b/);
+  if (generic?.[1]) {
+    const candidate = `${Number(generic[1])}p`;
+    if ((VIDEO_RESOLUTIONS as readonly string[]).includes(candidate)) {
+      return { value: candidate as VideoResolution, requested: candidate };
+    }
+    return { value: null, requested: candidate };
+  }
+
+  if (/\b(hd)\b/.test(t)) return { value: "720p", requested: "720p" };
+  if (/\b(sd)\b/.test(t)) return { value: "480p", requested: "480p" };
+
+  return { value: null, requested: null };
+}
+
 function isYes(text: string): boolean {
   const t = text.trim().toLowerCase();
   return /^(sim|s|confirmar|confirmo|ok|bora)\b/.test(t);
@@ -859,8 +914,8 @@ export default function App() {
     prompt: string;
     imageDataUrl: string;
     duration: number;
-    aspect_ratio: "16:9" | "1:1";
-    resolution: "480p" | "720p";
+    aspect_ratio: VideoAspectRatio;
+    resolution: VideoResolution;
     provider: "xai" | "replicate";
     model_id?: string;
   };
@@ -1496,6 +1551,8 @@ export default function App() {
       url,
       createdAt: Date.now(),
     }));
+    const videoAspectOptions = VIDEO_ASPECT_RATIOS.join(", ");
+    const videoResolutionOptions = VIDEO_RESOLUTIONS.join(", ");
 
     // If we are waiting for a video confirmation, interpret the next message as the confirmation step.
     if (pendingConfirm) {
@@ -1539,10 +1596,19 @@ export default function App() {
         return;
       }
 
-      const requested = parseRequestedVideoDurationSeconds(trimmed);
-      const durationToUse = Math.min(Math.max(requested ?? pendingConfirm.duration, 1), 15);
+      const requestedDuration = parseRequestedVideoDurationSeconds(trimmed);
+      const requestedAspect = parseRequestedVideoAspectRatio(trimmed);
+      const requestedResolution = parseRequestedVideoResolution(trimmed);
+
+      const durationToUse = Math.min(Math.max(requestedDuration ?? pendingConfirm.duration, 1), 15);
+      const aspectToUse = requestedAspect.value ?? pendingConfirm.aspect_ratio;
+      const resolutionToUse = requestedResolution.value ?? pendingConfirm.resolution;
       const imageToUse = attachedImageDataUrl || pendingConfirm.imageDataUrl;
-      const didUpdate = Boolean(attachedImageDataUrl) || requested !== null;
+      const didUpdate =
+        Boolean(attachedImageDataUrl) ||
+        requestedDuration !== null ||
+        requestedAspect.value !== null ||
+        requestedResolution.value !== null;
 
       if (didUpdate) {
         setPendingVideoConfirms((prev) => ({
@@ -1550,6 +1616,8 @@ export default function App() {
           [threadId]: {
             ...prev[threadId],
             duration: durationToUse,
+            aspect_ratio: aspectToUse,
+            resolution: resolutionToUse,
             imageDataUrl: imageToUse,
           },
         }));
@@ -1559,15 +1627,30 @@ export default function App() {
       }
 
       if (!isYes(trimmed)) {
+        const unsupportedNotes: string[] = [];
+        if (requestedAspect.requested && !requestedAspect.value) {
+          unsupportedNotes.push(`Proporcao \`${requestedAspect.requested}\` nao suportada. Usando \`${aspectToUse}\`.`);
+        }
+        if (requestedResolution.requested && !requestedResolution.value) {
+          unsupportedNotes.push(`Resolucao \`${requestedResolution.requested}\` nao suportada. Usando \`${resolutionToUse}\`.`);
+        }
+
         const durationLine =
-          requested && requested > 15
-            ? `Voce pediu ${requested}s, mas o maximo e 15s. Posso gerar com 15s.`
+          requestedDuration && requestedDuration > 15
+            ? `Voce pediu ${requestedDuration}s, mas o maximo e 15s. Posso gerar com 15s.`
             : didUpdate
-              ? `Vou gerar um video de ${durationToUse}s (maximo 15s).`
+              ? `Vou gerar um video de ${durationToUse}s em ${aspectToUse} (${resolutionToUse}).`
               : "";
 
         updateMessageInThread(threadId, assistantId, {
-          text: `${durationLine ? `${durationLine}\n\n` : ""}Para confirmar o video, responda \`sim\`. Para abortar, responda \`cancelar\`.`,
+          text:
+            `${durationLine ? `${durationLine}\n\n` : ""}` +
+            `${unsupportedNotes.length ? `${unsupportedNotes.join("\n")}\n\n` : ""}` +
+            "Imagem de referencia: vou usar a imagem anexada neste chat.\n" +
+            `Configuracao atual: \`${durationToUse}s\` | \`${aspectToUse}\` | \`${resolutionToUse}\`.\n\n` +
+            `Proporcoes disponiveis: ${videoAspectOptions}.\n` +
+            `Resolucoes disponiveis: ${videoResolutionOptions}.\n\n` +
+            "Para confirmar o video, responda `sim`. Para abortar, responda `cancelar`.",
         });
         return;
       }
@@ -1598,8 +1681,8 @@ export default function App() {
             prompt: pendingConfirm.prompt,
             image_url: imageToUse,
             duration: durationToUse,
-            aspect_ratio: pendingConfirm.aspect_ratio,
-            resolution: pendingConfirm.resolution,
+            aspect_ratio: aspectToUse,
+            resolution: resolutionToUse,
             provider: pendingConfirm.provider || "xai",
             video_model_id: pendingConfirm.model_id || undefined,
           },
@@ -1686,14 +1769,31 @@ export default function App() {
         return;
       }
 
-      const requested = parseRequestedVideoDurationSeconds(promptText);
-      const desired = requested ?? 5;
+      const requestedDuration = parseRequestedVideoDurationSeconds(promptText);
+      const requestedAspect = parseRequestedVideoAspectRatio(promptText);
+      const requestedResolution = parseRequestedVideoResolution(promptText);
+
+      const desired = requestedDuration ?? 5;
       const duration = Math.min(Math.max(desired, 1), 15);
+      const aspectRatio: VideoAspectRatio = requestedAspect.value ?? "16:9";
+      const resolution: VideoResolution = requestedResolution.value ?? "720p";
+
+      const unsupportedNotes: string[] = [];
+      if (requestedAspect.requested && !requestedAspect.value) {
+        unsupportedNotes.push(
+          `Proporcao \`${requestedAspect.requested}\` nao suportada. Usando \`${aspectRatio}\`.`
+        );
+      }
+      if (requestedResolution.requested && !requestedResolution.value) {
+        unsupportedNotes.push(
+          `Resolucao \`${requestedResolution.requested}\` nao suportada. Usando \`${resolution}\`.`
+        );
+      }
 
       const durationLine =
-        requested && requested > 15
-          ? `Voce pediu ${requested}s, mas o maximo e 15s. Posso gerar com 15s.`
-          : `Vou gerar um video de ${duration}s (maximo 15s).`;
+        requestedDuration && requestedDuration > 15
+          ? `Voce pediu ${requestedDuration}s, mas o maximo e 15s. Posso gerar com 15s.`
+          : `Vou gerar um video de ${duration}s em ${aspectRatio} (${resolution}).`;
 
       appendToThread(
         threadId,
@@ -1702,7 +1802,13 @@ export default function App() {
           {
             id: assistantId,
             role: "assistant",
-            text: `${durationLine}\n\nConfirma? Responda \`sim\` para gerar ou \`cancelar\` para abortar.`,
+            text:
+              `${durationLine}\n\n` +
+              `${unsupportedNotes.length ? `${unsupportedNotes.join("\n")}\n\n` : ""}` +
+              "Imagem de referencia: vou usar a imagem anexada neste chat.\n" +
+              `Proporcoes disponiveis: ${videoAspectOptions}.\n` +
+              `Resolucoes disponiveis: ${videoResolutionOptions}.\n\n` +
+              "Confirma? Responda `sim` para gerar ou `cancelar` para abortar.",
             createdAt: Date.now(),
           },
         ],
@@ -1715,8 +1821,8 @@ export default function App() {
           prompt: promptText,
           imageDataUrl: attachedImageDataUrl,
           duration,
-          aspect_ratio: "16:9",
-          resolution: "720p",
+          aspect_ratio: aspectRatio,
+          resolution,
           provider: selectedVideoProvider,
           model_id: selectedVideoModelId,
         },
