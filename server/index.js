@@ -4,6 +4,7 @@ import express from "express";
 import { clerkMiddleware, getAuth } from "@clerk/express";
 
 import { modelslabImageToImage, modelslabTextToImage } from "./providers/modelslab.js";
+import { getReplicateToken, replicateTextToImage } from "./providers/replicate.js";
 import { getXaiKey, xaiGenerateVideo, xaiVideoStatus } from "./providers/xai.js";
 
 const PORT = Number(process.env.PORT || 8787);
@@ -134,6 +135,7 @@ app.get("/api/health", (_req, res) => {
     status: "ok",
     apis: {
       modelslab: !!process.env.MODELSLAB_API_KEY,
+      replicate: !!getReplicateToken(),
       xai: !!getXaiKey(),
       serpapi: !!getSerpApiKey(),
     },
@@ -159,19 +161,64 @@ app.post("/api/web/search", requireClerkAuth, async (req, res) => {
 
 app.post("/api/image/generate", requireClerkAuth, async (req, res) => {
   try {
-    const { prompt, aspectRatio, model_id, init_image, image } = req.body || {};
+    const { prompt, aspectRatio, model_id, init_image, image, negative_prompt, fallback_on_blocked, provider } = req.body || {};
     if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
       res.status(400).json({ success: false, error: "Prompt is required." });
       return;
     }
 
     const initImage = init_image || image;
-    const result = await modelslabTextToImage({
-      prompt,
-      aspectRatio: aspectRatio || "1:1",
-      modelId: model_id,
-      initImage,
-    });
+    const useReplicateFirst = String(provider || "").trim().toLowerCase() === "replicate";
+    const shouldFallbackOnBlocked =
+      fallback_on_blocked === undefined ? true : Boolean(fallback_on_blocked);
+
+    let result;
+    let usedProvider = useReplicateFirst ? "replicate" : "modelslab";
+
+    if (useReplicateFirst) {
+      result = await replicateTextToImage({
+        prompt,
+        aspectRatio: aspectRatio || "1:1",
+        modelId: model_id,
+        negativePrompt: negative_prompt,
+      });
+    } else {
+      result = await modelslabTextToImage({
+        prompt,
+        aspectRatio: aspectRatio || "1:1",
+        modelId: model_id,
+        initImage,
+      });
+
+      // Optional fallback when ModelsLab blocks NSFW/policy content.
+      if (
+        !result.success &&
+        result.errorCode === "CONTENT_BLOCKED" &&
+        shouldFallbackOnBlocked
+      ) {
+        const fallback = await replicateTextToImage({
+          prompt,
+          aspectRatio: aspectRatio || "1:1",
+          modelId: model_id,
+          negativePrompt: negative_prompt,
+        });
+        if (fallback.success) {
+          result = fallback;
+          usedProvider = "replicate";
+        } else {
+          result = {
+            ...result,
+            fallback: {
+              provider: "replicate",
+              success: false,
+              errorCode: fallback.errorCode,
+              errorMessage: fallback.errorMessage,
+            },
+          };
+        }
+      }
+    }
+
     if (!result.success) {
       const status = result.errorCode === "CONTENT_BLOCKED" ? 422 : 502;
       res.status(status).json({ success: false, ...result });
@@ -182,7 +229,43 @@ app.post("/api/image/generate", requireClerkAuth, async (req, res) => {
       ? result.urls.find((u) => typeof u === "string" && (u.startsWith("http://") || u.startsWith("https://")))
       : null;
 
-    res.json({ success: true, urls: firstUrl ? [firstUrl] : [], requestId: result.requestId });
+    res.json({
+      success: true,
+      urls: firstUrl ? [firstUrl] : [],
+      requestId: result.requestId,
+      provider: usedProvider,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: "Image generation failed." });
+  }
+});
+
+app.post("/api/image/generate-alt", requireClerkAuth, async (req, res) => {
+  try {
+    const { prompt, aspectRatio, model_id, negative_prompt } = req.body || {};
+    if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
+      res.status(400).json({ success: false, error: "Prompt is required." });
+      return;
+    }
+
+    const result = await replicateTextToImage({
+      prompt,
+      aspectRatio: aspectRatio || "1:1",
+      modelId: model_id,
+      negativePrompt: negative_prompt,
+    });
+
+    if (!result.success) {
+      const status = result.errorCode === "CONTENT_BLOCKED" ? 422 : 502;
+      res.status(status).json({ success: false, ...result });
+      return;
+    }
+
+    const firstUrl = Array.isArray(result.urls)
+      ? result.urls.find((u) => typeof u === "string" && (u.startsWith("http://") || u.startsWith("https://")))
+      : null;
+
+    res.json({ success: true, urls: firstUrl ? [firstUrl] : [], requestId: result.requestId, provider: "replicate" });
   } catch (e) {
     res.status(500).json({ success: false, error: "Image generation failed." });
   }
