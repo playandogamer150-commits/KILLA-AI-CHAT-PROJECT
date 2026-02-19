@@ -11,9 +11,11 @@ pnpm-debug.log*
 vite.config.js
 vite.config.d.ts
 .env
+.env.production
 .env.*
 !.env.example
 !.env.*.example
 !server/.env.example
+server/data/*.json
 server/data/*
 !server/data/.gitkeep
