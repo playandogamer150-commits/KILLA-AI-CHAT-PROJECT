@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+
+node scripts/precommit-secret-scan.mjs
+status=$?
+
+if [ $status -ne 0 ]; then
+  echo ""
+  echo "Commit bloqueado pelo scanner de segredos."
+  echo "Remova os segredos dos arquivos staged e tente novamente."
+  exit $status
+fi
+
+exit 0
