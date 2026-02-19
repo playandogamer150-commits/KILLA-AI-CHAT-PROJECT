@@ -15,6 +15,13 @@ export type ChatMessage = {
   text: string;
   createdAt: number;
   attachments?: ChatAttachment[];
+  meta?: {
+    knowledge?: {
+      used: boolean;
+      sourceCount?: number;
+      engine?: string;
+    };
+  };
 };
 
 export type Tool = {
@@ -58,11 +65,13 @@ export type ReasoningTraceSource = {
 };
 
 export type ReasoningTrace = {
-  mode: "think" | "deepsearch" | "hybrid";
+  mode: "think" | "deepsearch" | "hybrid" | "media";
   title: string;
   steps: ReasoningTraceStep[];
   optimizer?: {
     label: string;
+    keywords?: string[];
+    strategy?: string;
   };
   optimizedQueries?: string[];
   queries?: string[];

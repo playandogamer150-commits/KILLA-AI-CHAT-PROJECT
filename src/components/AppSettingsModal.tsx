@@ -12,7 +12,6 @@ type HealthResponse = {
   status?: string;
   apis?: {
     modelslab?: boolean;
-    xai?: boolean;
     serpapi?: boolean;
   };
 };
@@ -40,7 +39,6 @@ export default function AppSettingsModal({
     return {
       serpapi: Boolean(a.serpapi),
       modelslab: Boolean(a.modelslab),
-      xai: Boolean(a.xai),
     };
   }, [health]);
 
@@ -125,9 +123,7 @@ export default function AppSettingsModal({
             <div className="settings-readonly" aria-label="Health status">
               SerpAPI (DeepSearch): {apis.serpapi ? "OK" : "OFF"}
               {"\n"}
-              ModelsLab (Imagens): {apis.modelslab ? "OK" : "OFF"}
-              {"\n"}
-              xAI (Video): {apis.xai ? "OK" : "OFF"}
+              ModelsLab (Imagem + Video): {apis.modelslab ? "OK" : "OFF"}
             </div>
           </div>
 

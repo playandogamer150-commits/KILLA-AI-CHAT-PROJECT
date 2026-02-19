@@ -21,8 +21,8 @@ type TopBarProps = {
   activeTools: string[];
   imageModel: "seedream-4.5" | "nano-banana-pro";
   onImageModelChange: (value: "seedream-4.5" | "nano-banana-pro") => void;
-  videoModel: "xai-grok-imagine-video" | "replicate-grok-imagine-video";
-  onVideoModelChange: (value: "xai-grok-imagine-video" | "replicate-grok-imagine-video") => void;
+  videoModel: "modelslab-grok-imagine-video-i2v";
+  onVideoModelChange: (value: "modelslab-grok-imagine-video-i2v") => void;
 
   connected: boolean;
   onConnectClick: () => void;
@@ -234,8 +234,8 @@ function MediaDropdown({
   subtitle: string;
   imageModel: "seedream-4.5" | "nano-banana-pro";
   onImageModelChange: (value: "seedream-4.5" | "nano-banana-pro") => void;
-  videoModel: "xai-grok-imagine-video" | "replicate-grok-imagine-video";
-  onVideoModelChange: (value: "xai-grok-imagine-video" | "replicate-grok-imagine-video") => void;
+  videoModel: "modelslab-grok-imagine-video-i2v";
+  onVideoModelChange: (value: "modelslab-grok-imagine-video-i2v") => void;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
@@ -332,39 +332,20 @@ function MediaDropdown({
             <div className="model-dd-group-title">Create Video</div>
             <button
               type="button"
-              className={`model-dd-opt ${videoModel === "xai-grok-imagine-video" ? "active" : ""}`}
+              className={`model-dd-opt ${videoModel === "modelslab-grok-imagine-video-i2v" ? "active" : ""}`}
               role="option"
-              aria-selected={videoModel === "xai-grok-imagine-video"}
+              aria-selected={videoModel === "modelslab-grok-imagine-video-i2v"}
               onClick={() => {
-                onVideoModelChange("xai-grok-imagine-video");
+                onVideoModelChange("modelslab-grok-imagine-video-i2v");
                 setOpen(false);
                 buttonRef.current?.focus();
               }}
             >
-              <div className="model-dd-opt-title">Grok Imagine Video</div>
+              <div className="model-dd-opt-title">Grok Imagine Img2Video</div>
               <div className="model-dd-opt-sub">
-                <span>xAI</span>
+                <span>ModelsLab</span>
                 <span className="sep">|</span>
-                <span className="mono">grok-imagine-video</span>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              className={`model-dd-opt ${videoModel === "replicate-grok-imagine-video" ? "active" : ""}`}
-              role="option"
-              aria-selected={videoModel === "replicate-grok-imagine-video"}
-              onClick={() => {
-                onVideoModelChange("replicate-grok-imagine-video");
-                setOpen(false);
-                buttonRef.current?.focus();
-              }}
-            >
-              <div className="model-dd-opt-title">Grok Imagine Video (Replicate)</div>
-              <div className="model-dd-opt-sub">
-                <span>Replicate</span>
-                <span className="sep">|</span>
-                <span className="mono">xai/grok-imagine-video</span>
+                <span className="mono">grok-imagine-video-i2v</span>
               </div>
             </button>
           </div>
@@ -409,9 +390,7 @@ export default function TopBar({
       : "Killa Model Media";
 
   const mediaSubtitle = activeTools.includes("create-video")
-    ? videoModel === "replicate-grok-imagine-video"
-      ? "Grok Imagine Video (Replicate)"
-      : "Grok Imagine Video (xAI)"
+    ? "Grok Imagine Img2Video (ModelsLab)"
     : activeTools.includes("edit-image")
       ? "Grok Imagine Image Edit"
       : imageSubtitle;

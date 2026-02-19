@@ -5,6 +5,7 @@ const DEFAULT_REPLICATE_MODEL = "stability-ai/sdxl";
 const DEFAULT_REPLICATE_VIDEO_MODEL = "xai/grok-imagine-video";
 const VIDEO_ASPECT_RATIO_ALLOWED = new Set(["16:9", "4:3", "1:1", "9:16", "3:4", "3:2", "2:3"]);
 const VIDEO_RESOLUTION_ALLOWED = new Set(["720p", "480p"]);
+const VIDEO_IMAGE_MIME_ALLOWED = new Set(["image/png", "image/jpeg", "image/webp"]);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -12,6 +13,20 @@ function sleep(ms) {
 
 function sanitizePrompt(prompt) {
   return String(prompt || "").replace(/\0/g, "").trim();
+}
+
+function buildIdentityLockedVideoPrompt(prompt) {
+  const userPrompt = sanitizePrompt(prompt);
+  const lockRules = [
+    "Reference image identity lock:",
+    "treat the uploaded reference image as the same person and scene anchor.",
+    "Preserve face structure, skin tone, hair, body shape, age impression, and outfit details.",
+    "Do not change identity, gender, ethnicity, hairstyle, or clothing unless explicitly requested.",
+    "Only animate motion, camera movement, lighting and environment dynamics consistent with the reference.",
+    "If any instruction conflicts with identity lock, prioritize identity preservation.",
+  ].join(" ");
+
+  return userPrompt ? `${lockRules} ${userPrompt}` : lockRules;
 }
 
 function normalizeAspectRatio(aspectRatio) {
@@ -304,16 +319,94 @@ function extensionFromMime(mimeType) {
   return "bin";
 }
 
-async function replicateDataUriToFileUrl(dataUri, token) {
-  // Use Replicate native file upload to keep image fidelity close to Playground behavior.
-  const fileRes = await fetch(String(dataUri || ""), {
-    method: "GET",
-    signal: AbortSignal.timeout?.(30000),
-  });
-  if (!fileRes.ok) throw new Error(`Replicate data URI decode failed (HTTP ${fileRes.status}).`);
+function isLikelyImageFormatError(text) {
+  const msg = String(text || "").toLowerCase();
+  return msg.includes("invalid image format") || msg.includes("supported formats") || msg.includes("unsupported image");
+}
 
-  const blob = await fileRes.blob();
-  const ext = extensionFromMime(blob.type);
+function isLikelyImageCandidateError(statusCode, text) {
+  const msg = String(text || "").toLowerCase();
+  if (isLikelyImageFormatError(msg)) return true;
+  if (statusCode === 400 || statusCode === 422) return true;
+  return (
+    msg.includes("invalid image") ||
+    msg.includes("unable to fetch") ||
+    msg.includes("failed to fetch") ||
+    (msg.includes("image") && msg.includes("url"))
+  );
+}
+
+function sniffImageMime(buffer) {
+  if (!buffer || buffer.length < 12) return "";
+  // JPEG magic bytes
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "image/jpeg";
+  // PNG magic bytes
+  if (
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0d &&
+    buffer[5] === 0x0a &&
+    buffer[6] === 0x1a &&
+    buffer[7] === 0x0a
+  ) {
+    return "image/png";
+  }
+  // WEBP magic bytes: RIFF....WEBP
+  if (
+    buffer[0] === 0x52 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x46 &&
+    buffer[8] === 0x57 &&
+    buffer[9] === 0x45 &&
+    buffer[10] === 0x42 &&
+    buffer[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+  return "";
+}
+
+function decodeImageDataUri(dataUri) {
+  const raw = String(dataUri || "").trim();
+  if (!raw.startsWith("data:")) throw new Error("Invalid data URI.");
+
+  const commaIdx = raw.indexOf(",");
+  if (commaIdx < 0) throw new Error("Malformed data URI.");
+
+  const meta = raw.slice(5, commaIdx);
+  const payload = raw.slice(commaIdx + 1);
+  const parts = meta.split(";").filter(Boolean);
+  const first = parts[0] || "";
+  const declaredMime = first && !first.includes("=") ? first.toLowerCase() : "application/octet-stream";
+  const isBase64 = parts.some((part) => part.toLowerCase() === "base64");
+
+  const bytes = isBase64
+    ? Buffer.from(payload.replace(/\s+/g, ""), "base64")
+    : Buffer.from(decodeURIComponent(payload), "utf8");
+
+  if (!bytes || bytes.length === 0) {
+    throw new Error("Empty data URI payload.");
+  }
+
+  const sniffed = sniffImageMime(bytes);
+  let mimeType = sniffed || declaredMime;
+  if (mimeType === "image/jpg") mimeType = "image/jpeg";
+
+  return { bytes, mimeType };
+}
+
+async function replicateDataUriToFileUrl(dataUri, token) {
+  // Decode data URI directly (more robust than fetch(data:...) across Node runtimes).
+  const { bytes, mimeType } = decodeImageDataUri(dataUri);
+  if (!VIDEO_IMAGE_MIME_ALLOWED.has(mimeType)) {
+    throw new Error(`Unsupported image MIME for video: ${mimeType}`);
+  }
+
+  const blob = new Blob([bytes], { type: mimeType });
+  const ext = extensionFromMime(mimeType);
 
   const form = new FormData();
   form.append("content", blob, `input.${ext}`);
@@ -332,7 +425,11 @@ async function replicateDataUriToFileUrl(dataUri, token) {
     throw new Error(`Replicate file upload failed (HTTP ${uploadRes.status}).`);
   }
 
-  const fileUrl = parsed.data?.urls?.get;
+  const fileUrl =
+    parsed.data?.urls?.public ||
+    parsed.data?.urls?.download ||
+    parsed.data?.urls?.get ||
+    parsed.data?.url;
   if (!fileUrl || typeof fileUrl !== "string") {
     throw new Error("Replicate file upload returned no file URL.");
   }
@@ -356,19 +453,11 @@ export async function replicateGenerateVideo({
   if (!cleanPrompt) {
     return { success: false, error: "Prompt is required." };
   }
+  const finalPrompt = buildIdentityLockedVideoPrompt(cleanPrompt);
 
-  let resolvedImageUrl = String(imageUrl || "").trim();
-  if (resolvedImageUrl.startsWith("data:")) {
-    try {
-      resolvedImageUrl = await replicateDataUriToFileUrl(resolvedImageUrl, token);
-    } catch {
-      // Fallback path to preserve compatibility if Replicate upload fails.
-      try {
-        resolvedImageUrl = await modelslabBase64ToUrl(resolvedImageUrl);
-      } catch {
-        // keep original if conversion fails; provider may still reject gracefully.
-      }
-    }
+  const rawImageInput = String(imageUrl || "").trim();
+  if (!rawImageInput) {
+    return { success: false, error: "Image is required." };
   }
 
   const model = String(modelId || getReplicateVideoModelId()).trim();
@@ -390,42 +479,94 @@ export async function replicateGenerateVideo({
     return { success: false, error: "Replicate model has no latest_version id." };
   }
 
-  const input = {
-    prompt: cleanPrompt,
-    image: resolvedImageUrl || undefined,
-    duration: normalizeVideoDuration(duration),
-    aspect_ratio: normalizeVideoAspectRatio(aspect_ratio),
-    resolution: normalizeVideoResolution(resolution),
-  };
+  const imageCandidates = [];
+  if (rawImageInput.startsWith("data:")) {
+    // Prefer a public URL first (usually best compatibility for upstream providers).
+    try {
+      const modelslabUrl = await modelslabBase64ToUrl(rawImageInput);
+      if (typeof modelslabUrl === "string" && /^https?:\/\//i.test(modelslabUrl)) {
+        imageCandidates.push(modelslabUrl);
+      }
+    } catch {
+      // ignore and try next strategy
+    }
 
-  const createRes = await fetch(`${REPLICATE_API_BASE}/predictions`, {
-    method: "POST",
-    headers: getReplicateHeaders(token, false),
-    body: JSON.stringify({
-      version,
-      input,
-    }),
-    signal: AbortSignal.timeout?.(120000),
-  });
+    // Replicate file upload fallback for data URIs.
+    try {
+      const fileUrl = await replicateDataUriToFileUrl(rawImageInput, token);
+      if (typeof fileUrl === "string" && /^https?:\/\//i.test(fileUrl)) {
+        imageCandidates.push(fileUrl);
+      }
+    } catch {
+      // ignore and try next strategy
+    }
 
-  const createParsed = await safeJson(createRes);
-  if (!createRes.ok || !createParsed.ok) {
-    const errText = createParsed.data?.detail || createParsed.text || `HTTP ${createRes.status}`;
-    return { success: false, error: `Replicate create failed: ${String(errText).slice(0, 240)}` };
+    // Last resort: send data URI directly.
+    imageCandidates.push(rawImageInput);
+  } else {
+    imageCandidates.push(rawImageInput);
   }
 
-  const prediction = createParsed.data || {};
-  const predictionId = String(prediction?.id || "").trim();
-  if (!predictionId) {
-    return { success: false, error: "Replicate returned no prediction id." };
+  const dedupedCandidates = [...new Set(imageCandidates.map((item) => String(item || "").trim()).filter(Boolean))];
+  if (!dedupedCandidates.length) {
+    return {
+      success: false,
+      error: "Nao foi possivel preparar a imagem de referencia para video (png/jpg/webp).",
+    };
   }
 
-  const immediateVideo = extractFirstUriFromOutput(prediction?.output);
-  return {
-    success: true,
-    request_id: `replicate:${predictionId}`,
-    video_url: immediateVideo || undefined,
-  };
+  let lastErr = "";
+  for (let idx = 0; idx < dedupedCandidates.length; idx++) {
+    const candidate = dedupedCandidates[idx];
+    const input = {
+      prompt: finalPrompt,
+      image: candidate,
+      duration: normalizeVideoDuration(duration),
+      aspect_ratio: normalizeVideoAspectRatio(aspect_ratio),
+      resolution: normalizeVideoResolution(resolution),
+    };
+
+    const createRes = await fetch(`${REPLICATE_API_BASE}/predictions`, {
+      method: "POST",
+      headers: getReplicateHeaders(token, false),
+      body: JSON.stringify({
+        version,
+        input,
+      }),
+      signal: AbortSignal.timeout?.(120000),
+    });
+
+    const createParsed = await safeJson(createRes);
+    if (!createRes.ok || !createParsed.ok) {
+      const statusCode = Number(createRes.status) || 0;
+      const errText = createParsed.data?.detail || createParsed.text || `HTTP ${createRes.status}`;
+      lastErr = String(errText).slice(0, 240);
+
+      // Try the next image candidate when failure is likely candidate-specific.
+      if (idx < dedupedCandidates.length - 1 && isLikelyImageCandidateError(statusCode, lastErr)) {
+        continue;
+      }
+
+      return { success: false, error: `Replicate create failed: ${lastErr}` };
+    }
+
+    const prediction = createParsed.data || {};
+    const predictionId = String(prediction?.id || "").trim();
+    if (!predictionId) {
+      lastErr = "Replicate returned no prediction id.";
+      if (idx < dedupedCandidates.length - 1) continue;
+      return { success: false, error: lastErr };
+    }
+
+    const immediateVideo = extractFirstUriFromOutput(prediction?.output);
+    return {
+      success: true,
+      request_id: `replicate:${predictionId}`,
+      video_url: immediateVideo || undefined,
+    };
+  }
+
+  return { success: false, error: `Replicate create failed: ${lastErr || "unknown error"}` };
 }
 
 export async function replicateVideoStatus({ requestId }) {

@@ -6,6 +6,20 @@ export function getXaiKey() {
   return process.env.XAI_API_KEY || "";
 }
 
+function buildIdentityLockedVideoPrompt(prompt) {
+  const userPrompt = String(prompt || "").trim();
+  const lockRules = [
+    "Reference image identity lock:",
+    "use the provided reference image as frame zero and keep the same person.",
+    "Preserve face structure, skin tone, hair, body shape, age impression, and outfit details.",
+    "Do not change identity, gender, ethnicity, hairstyle, or clothing unless explicitly requested.",
+    "Only animate motion, camera movement, lighting and environment dynamics consistent with the reference.",
+    "If any instruction conflicts with identity lock, prioritize identity preservation.",
+  ].join(" ");
+
+  return userPrompt ? `${lockRules} ${userPrompt}` : lockRules;
+}
+
 export async function xaiGenerateVideo({ prompt, imageUrl, duration = 10, aspect_ratio = "16:9", resolution = "720p" }) {
   const key = getXaiKey();
   if (!key) {
@@ -26,10 +40,7 @@ export async function xaiGenerateVideo({ prompt, imageUrl, duration = 10, aspect
     }
   }
 
-  const userPrompt = String(prompt || "").trim();
-  const guidance =
-    "Use the provided reference image as the main visual input. Keep the same subject/identity, clothing and scene unless the prompt explicitly requests changes. ";
-  const finalPrompt = userPrompt ? `${guidance}${userPrompt}` : guidance.trim();
+  const finalPrompt = buildIdentityLockedVideoPrompt(prompt);
 
   const body = {
     model: "grok-imagine-video",

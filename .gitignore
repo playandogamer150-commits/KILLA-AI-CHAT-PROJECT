@@ -15,3 +15,5 @@ vite.config.d.ts
 !.env.example
 !.env.*.example
 !server/.env.example
+server/data/*
+!server/data/.gitkeep

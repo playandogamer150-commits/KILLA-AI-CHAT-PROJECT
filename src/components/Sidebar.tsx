@@ -14,6 +14,7 @@ type SidebarProps = {
   onDelete: (id: string) => void;
   onOpenProfile: () => void;
   onOpenSettings: () => void;
+  onOpenKnowledgeStudio: () => void;
   onLogout: () => void;
 };
 
@@ -96,6 +97,16 @@ function LogoutIcon() {
   );
 }
 
+function DatabaseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <ellipse cx="12" cy="6" rx="7.5" ry="3.5" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M4.5 6v6c0 1.9 3.3 3.5 7.5 3.5s7.5-1.6 7.5-3.5V6" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M4.5 12v6c0 1.9 3.3 3.5 7.5 3.5s7.5-1.6 7.5-3.5v-6" stroke="currentColor" strokeWidth="1.7" />
+    </svg>
+  );
+}
+
 export default function Sidebar({
   open,
   threads,
@@ -109,6 +120,7 @@ export default function Sidebar({
   onDelete,
   onOpenProfile,
   onOpenSettings,
+  onOpenKnowledgeStudio,
   onLogout,
 }: SidebarProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -383,6 +395,13 @@ export default function Sidebar({
 
         <div className="sidebar-footer">
           <div className="sidebar-subtitle">Conta</div>
+
+          <button type="button" className="sidebar-nav-btn" onClick={onOpenKnowledgeStudio}>
+            <span className="sidebar-nav-ic" aria-hidden="true">
+              <DatabaseIcon />
+            </span>
+            Knowledge Studio
+          </button>
 
           <button type="button" className="sidebar-nav-btn" onClick={onOpenProfile}>
             <span className="sidebar-nav-ic" aria-hidden="true">

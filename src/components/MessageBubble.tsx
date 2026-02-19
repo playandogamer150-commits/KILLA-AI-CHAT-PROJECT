@@ -15,15 +15,80 @@ const THINK_TRACE_STEPS: ReasoningTrace["steps"] = [
   { id: "answer", label: "Refinando a melhor resposta", status: "pending" },
 ];
 
-function OptimizerIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M12 3.75 13.7 8.3l4.55 1.7-4.55 1.7L12 16.25l-1.7-4.55-4.55-1.7 4.55-1.7L12 3.75Zm6.35 10.9.9 2.45 2.45.9-2.45.9-.9 2.45-.9-2.45-2.45-.9 2.45-.9.9-2.45Zm-12.7 0 .9 2.45 2.45.9-2.45.9-.9 2.45-.9-2.45-2.45-.9 2.45-.9.9-2.45Z"
-        fill="currentColor"
-      />
-    </svg>
-  );
+type ReasoningTickerItem = {
+  id: string;
+  title: string;
+  description?: string;
+};
+
+function getStepDescription(step: ReasoningTrace["steps"][number]): string {
+  if (step.note && step.note.trim()) return step.note.trim();
+  if (step.status === "active") return "Em andamento";
+  if (step.status === "done") return "Concluido";
+  return "Na fila";
+}
+
+function buildStaticTickerTitle(label: string, trace?: ReasoningTrace): string {
+  if (trace?.mode === "hybrid") return "THINK + DEEP SEARCH";
+  if (trace?.mode === "deepsearch") return "DEEP SEARCH";
+  if (trace?.mode === "think") return "THINK";
+
+  const source = `${trace?.title || label}`.toUpperCase();
+  if (source.includes("CREATE VIDEO")) return "CREATE VIDEO";
+  if (source.includes("EDIT IMAGE")) return "EDIT IMAGE";
+  if (source.includes("CREATE IMAGES")) return "CREATE IMAGES";
+  return label || "Processando";
+}
+
+function buildReasoningTickerItems(label: string, trace?: ReasoningTrace): ReasoningTickerItem[] {
+  const steps = trace?.steps?.length ? trace.steps : THINK_TRACE_STEPS;
+  const items: ReasoningTickerItem[] = steps.map((step) => ({
+    id: `step-${step.id}`,
+    title: step.label,
+    description: getStepDescription(step),
+  }));
+
+  if (trace?.optimizer?.strategy) {
+    items.push({
+      id: "optimizer-strategy",
+      title: trace.optimizer.label || "Optimizer",
+      description: trace.optimizer.strategy,
+    });
+  }
+
+  if (trace?.optimizer?.keywords && trace.optimizer.keywords.length > 0) {
+    items.push({
+      id: "optimizer-keywords",
+      title: "Palavras-chave",
+      description: trace.optimizer.keywords.slice(0, 4).join(", "),
+    });
+  }
+
+  if (trace?.queries && trace.queries.length > 0) {
+    items.push({
+      id: "search-queries",
+      title: "Pesquisando",
+      description: `${trace.queries.length} consulta(s) em andamento`,
+    });
+  }
+
+  if (trace?.sources && trace.sources.length > 0) {
+    items.push({
+      id: "search-sources",
+      title: "Revisando fontes",
+      description: `${trace.sources.length} fonte(s) analisada(s)`,
+    });
+  }
+
+  if (items.length === 0) {
+    items.push({
+      id: "fallback-loading",
+      title: label || "Processando",
+      description: "Carregando",
+    });
+  }
+
+  return items;
 }
 
 function ReasoningTracePanel({
@@ -33,106 +98,59 @@ function ReasoningTracePanel({
   label: string;
   trace?: ReasoningTrace;
 }) {
-  const [activeStep, setActiveStep] = useState(0);
   const steps = trace?.steps?.length ? trace.steps : THINK_TRACE_STEPS;
+  const tickerItems = buildReasoningTickerItems(label, trace);
+  const initialStepIndex = Math.max(
+    0,
+    Math.min(
+      tickerItems.length - 1,
+      steps.findIndex((step) => step.status === "active")
+    )
+  );
+  const [lineIndex, setLineIndex] = useState(initialStepIndex);
 
   useEffect(() => {
-    if (trace?.steps?.length) return;
-    setActiveStep(0);
-    const timer = window.setInterval(() => {
-      setActiveStep((prev) => (prev + 1) % steps.length);
-    }, 900);
+    setLineIndex((prev) => {
+      if (!tickerItems.length) return 0;
+      if (prev >= tickerItems.length) return initialStepIndex;
+      return prev;
+    });
+  }, [initialStepIndex, tickerItems.length]);
 
+  useEffect(() => {
+    if (tickerItems.length <= 1) return;
+    const timer = window.setInterval(() => {
+      setLineIndex((prev) => (prev + 1) % tickerItems.length);
+    }, 3400);
     return () => window.clearInterval(timer);
-  }, [steps.length, trace?.steps]);
+  }, [tickerItems.length]);
+
+  const current = tickerItems[lineIndex] || {
+    id: "loading",
+    title: label || "Processando",
+    description: "Carregando",
+  };
+  const staticTitle = buildStaticTickerTitle(label, trace);
+  const rotatingDescription = current.description ? `${current.title}: ${current.description}` : current.title;
 
   return (
-    <div className="think-trace-wrap reasoning-trace-wrap" role="status" aria-live="polite">
-      <div className="think-trace-title">{label}</div>
-      <div className="think-trace-list">
-        {steps.map((step, index) => {
-          const isDone = trace ? step.status === "done" : index < activeStep;
-          const isActive = trace ? step.status === "active" : index === activeStep;
-
-          return (
-            <div key={step.id} className={`think-trace-step ${isDone ? "done" : ""} ${isActive ? "active" : ""}`.trim()}>
-              <span className="think-trace-dot" aria-hidden="true" />
-              <span className="think-trace-text">{step.label}</span>
-            </div>
-          );
-        })}
+    <div className="reasoning-compact-wrap" role="status" aria-live="polite">
+      <span className="reasoning-compact-loader" aria-hidden="true" />
+      <div className="reasoning-compact-track">
+        <div className="reasoning-compact-line">
+          <span className="reasoning-compact-title" title={staticTitle}>
+            {staticTitle}
+          </span>
+          <span className="reasoning-compact-divider">-</span>
+          <span
+            key={`${current.id}-${lineIndex}`}
+            className="reasoning-compact-description reasoning-compact-description-rotating"
+            title={rotatingDescription}
+          >
+            {rotatingDescription}
+          </span>
+        </div>
       </div>
-
-      {trace?.optimizer ? (
-        <section className="reasoning-section">
-          <div className="reasoning-section-title with-icon">
-            <span className="reasoning-section-icon" aria-hidden="true">
-              <OptimizerIcon />
-            </span>
-            <span>{trace.optimizer.label}</span>
-          </div>
-          {trace.optimizedQueries && trace.optimizedQueries.length > 0 ? (
-            <div className="reasoning-query-chips">
-              {trace.optimizedQueries.map((query) => (
-                <div key={`opt-${query}`} className="reasoning-query-chip optimizer" title={query}>
-                  {query}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="reasoning-optimizer-note">Gerando estrategia otimizada de pesquisa...</div>
-          )}
-        </section>
-      ) : null}
-
-      {trace?.queries && trace.queries.length > 0 ? (
-        <section className="reasoning-section">
-          <div className="reasoning-section-title">Pesquisando</div>
-          <div className="reasoning-query-chips">
-            {trace.queries.map((query) => (
-              <div key={query} className="reasoning-query-chip" title={query}>
-                {query}
-              </div>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      {trace?.sources && trace.sources.length > 0 ? (
-        <section className="reasoning-section">
-          <div className="reasoning-section-title">Revisando fontes</div>
-          <div className="reasoning-sources">
-            {trace.sources.map((source, idx) => (
-              (() => {
-                let domain = "";
-                if (source.url) {
-                  try {
-                    domain = new URL(source.url).hostname;
-                  } catch {
-                    domain = "";
-                  }
-                }
-
-                return (
-                  <a
-                    key={`${source.url || source.title}-${idx}`}
-                    className="reasoning-source-row"
-                    href={source.url || "#"}
-                    target={source.url ? "_blank" : undefined}
-                    rel={source.url ? "noreferrer noopener" : undefined}
-                    onClick={(e) => {
-                      if (!source.url) e.preventDefault();
-                    }}
-                  >
-                    <span className="reasoning-source-title">{source.title}</span>
-                    {domain ? <span className="reasoning-source-domain">{domain}</span> : null}
-                  </a>
-                );
-              })()
-            ))}
-          </div>
-        </section>
-      ) : null}
     </div>
   );
 }
@@ -167,11 +185,25 @@ export default function MessageBubble({ message, onOpenImage, typing, reasoningT
   const isTyping = Boolean(typing && message.role === "assistant");
   const isThinkTyping = /\busing THINK\b|\busando THINK\b|THINK/i.test(String(message.text || ""));
   const showReasoningTrace = isTyping && (Boolean(reasoningTrace) || isThinkTyping);
+  const knowledgeMeta = message.meta?.knowledge;
+  const showKnowledgeBadge = message.role === "assistant" && !isTyping && Boolean(knowledgeMeta?.used);
   const bubbleClass = `message-bubble ${isTyping ? "thinking" : ""} ${showReasoningTrace ? "think-trace" : ""}`.trim();
 
   return (
     <article className={`message-row ${message.role}`}>
       <div className={bubbleClass}>
+        {showKnowledgeBadge ? (
+          <div className="message-badge-row">
+            <span
+              className="message-badge knowledge"
+              title={`Knowledge Studio${knowledgeMeta?.sourceCount ? `: ${knowledgeMeta.sourceCount} fonte(s)` : ""}${
+                knowledgeMeta?.engine ? ` | engine: ${knowledgeMeta.engine}` : ""
+              }`}
+            >
+              Knowledge
+            </span>
+          </div>
+        ) : null}
         {isTyping ? (
           showReasoningTrace ? (
             <ReasoningTracePanel

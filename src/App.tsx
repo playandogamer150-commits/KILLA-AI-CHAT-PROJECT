@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { SignedIn, SignedOut, useAuth, useClerk } from "@clerk/clerk-react";
 import AuthLanding from "./components/AuthLanding";
 import AppSettingsModal from "./components/AppSettingsModal";
+import BetaAccessGate from "./components/BetaAccessGate";
 import Composer from "./components/Composer";
+import KnowledgeStudioModal from "./components/KnowledgeStudioModal";
 import Lightbox from "./components/Lightbox";
 import MessageBubble from "./components/MessageBubble";
 import ProfileModal from "./components/ProfileModal";
@@ -28,6 +30,48 @@ type PendingImageAttachment = {
   name: string;
   dataUrl: string;
 };
+
+type BetaAction =
+  | "text_basic"
+  | "text_think"
+  | "text_deepsearch"
+  | "text_think_deepsearch"
+  | "image_generate"
+  | "image_edit"
+  | "video_generate";
+
+type BetaAccessState = {
+  licensed: boolean;
+  plan_id: string;
+  plan_name: string;
+  credits: number;
+  total_granted: number;
+  total_spent: number;
+  license_key_masked?: string;
+  early_access?: {
+    enabled?: boolean;
+    title?: string;
+    included_credits?: number;
+    video_editing_enabled?: boolean;
+    video_warning_badge?: string;
+  };
+  action_costs?: Record<string, number>;
+};
+
+type BetaCheckoutState = {
+  purchase_url?: string;
+  support_email?: string;
+  delivery_mode?: string;
+  plan_id?: string;
+  plan_name?: string;
+  initial_credits?: number;
+};
+
+function videoAspectRatioToNumber(ratio: VideoAspectRatio): number {
+  const [w, h] = ratio.split(":").map((n) => Number(n));
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return 16 / 9;
+  return w / h;
+}
 
 const ALLOWED_TOOL_IDS = new Set(["deepsearch", "think", "create-images", "edit-image", "create-video"]);
 function coerceActiveTool(tool: unknown): string | null {
@@ -65,6 +109,330 @@ function normalizeToolSelection(raw: string[]): string[] {
   return ordered.slice(0, 2);
 }
 
+const KEYWORD_TOKEN_REGEX = /[a-zA-ZÀ-ÿ0-9]+(?:-[a-zA-ZÀ-ÿ0-9]+)*/g;
+
+const SHORT_KEYWORD_ALLOWLIST = new Set(["ia", "ai", "ux", "ui", "vr", "ar", "3d", "2d", "4g", "5g", "6g"]);
+
+const SEARCH_STOPWORDS = new Set([
+  "a",
+  "agora",
+  "algum",
+  "alguma",
+  "algumas",
+  "alguns",
+  "ante",
+  "ao",
+  "aos",
+  "apos",
+  "as",
+  "ate",
+  "bem",
+  "by",
+  "com",
+  "como",
+  "conversamos",
+  "contra",
+  "da",
+  "das",
+  "de",
+  "delas",
+  "deles",
+  "depois",
+  "desse",
+  "desta",
+  "do",
+  "dos",
+  "e",
+  "ela",
+  "elas",
+  "ele",
+  "eles",
+  "em",
+  "entao",
+  "entre",
+  "era",
+  "essa",
+  "essas",
+  "esse",
+  "esses",
+  "esta",
+  "estao",
+  "este",
+  "etc",
+  "eu",
+  "fala",
+  "falam",
+  "falar",
+  "faz",
+  "fazem",
+  "fazer",
+  "for",
+  "forma",
+  "foi",
+  "gente",
+  "get",
+  "ha",
+  "isso",
+  "isto",
+  "ja",
+  "la",
+  "lhe",
+  "lhes",
+  "mais",
+  "mas",
+  "me",
+  "med",
+  "menos",
+  "meu",
+  "minha",
+  "na",
+  "nao",
+  "nas",
+  "nem",
+  "no",
+  "nos",
+  "nossa",
+  "nosso",
+  "num",
+  "numa",
+  "o",
+  "of",
+  "on",
+  "os",
+  "ou",
+  "para",
+  "pela",
+  "pelas",
+  "pelo",
+  "pelos",
+  "por",
+  "pode",
+  "podem",
+  "poder",
+  "pra",
+  "pro",
+  "pros",
+  "que",
+  "quero",
+  "recomenda",
+  "recomendar",
+  "sabe",
+  "saber",
+  "se",
+  "sem",
+  "ser",
+  "sobre",
+  "so",
+  "sua",
+  "suas",
+  "tal",
+  "tao",
+  "te",
+  "tem",
+  "tenho",
+  "tipo",
+  "this",
+  "to",
+  "tu",
+  "tudo",
+  "uma",
+  "um",
+  "uns",
+  "vou",
+  "you",
+]);
+
+const PT_TO_EN_KEYWORD_MAP: Record<string, string> = {
+  "academia": "academy",
+  "analise": "analysis",
+  "analises": "analyses",
+  "arquitetura": "architecture",
+  "arte": "art",
+  "artigo": "article",
+  "artigos": "articles",
+  "atualizado": "updated",
+  "benchmark": "benchmark",
+  "comparacao": "comparison",
+  "comparativo": "comparative",
+  "contexto": "context",
+  "controle": "control",
+  "corrupcao": "corruption",
+  "crescimento": "growth",
+  "dados": "data",
+  "desempenho": "performance",
+  "desenvolvimento": "development",
+  "dica": "tip",
+  "dicas": "tips",
+  "economia": "economy",
+  "educacao": "education",
+  "egito": "egypt",
+  "empresa": "company",
+  "empresas": "companies",
+  "espionagem": "espionage",
+  "estrategia": "strategy",
+  "estrategias": "strategies",
+  "estudo": "study",
+  "estudos": "studies",
+  "filme": "movie",
+  "filmes": "movies",
+  "fonte": "source",
+  "fontes": "sources",
+  "governo": "government",
+  "guia": "guide",
+  "historico": "historical",
+  "impacto": "impact",
+  "implementacao": "implementation",
+  "industria": "industry",
+  "inovacao": "innovation",
+  "insights": "insights",
+  "investimento": "investment",
+  "limitacao": "limitation",
+  "limitacoes": "limitations",
+  "mercado": "market",
+  "metodo": "method",
+  "metodos": "methods",
+  "modelo": "model",
+  "modelos": "models",
+  "noticia": "news",
+  "noticias": "news",
+  "oficial": "official",
+  "pais": "country",
+  "paises": "countries",
+  "pesquisa": "research",
+  "podre": "scandal",
+  "podres": "scandals",
+  "politica": "politics",
+  "pratica": "practice",
+  "praticas": "practices",
+  "preco": "price",
+  "precos": "prices",
+  "produto": "product",
+  "produtos": "products",
+  "qualidade": "quality",
+  "recente": "recent",
+  "recomendacao": "recommendation",
+  "recomendacoes": "recommendations",
+  "relacao": "relationship",
+  "relatorio": "report",
+  "relatorios": "reports",
+  "resultado": "result",
+  "resultados": "results",
+  "revisao": "review",
+  "risco": "risk",
+  "riscos": "risks",
+  "saude": "health",
+  "seguranca": "security",
+  "servico": "service",
+  "servicos": "services",
+  "sistema": "system",
+  "sistemas": "systems",
+  "sociedade": "society",
+  "tecnico": "technical",
+  "tecnologia": "technology",
+  "tendencia": "trend",
+  "tendencias": "trends",
+};
+
+function stripDiacritics(input: string): string {
+  return input.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function normalizeKeywordToken(input: string): string {
+  return stripDiacritics(String(input || "").toLowerCase()).replace(/[^a-z0-9-]/g, "");
+}
+
+function translateKeywordTokenToEnglish(keyword: string): string {
+  const normalized = normalizeKeywordToken(keyword);
+  if (!normalized) return "";
+
+  const mapped = PT_TO_EN_KEYWORD_MAP[normalized];
+  if (mapped) return mapped;
+
+  if (normalized.includes("-")) {
+    const translatedParts = normalized
+      .split("-")
+      .map((part) => PT_TO_EN_KEYWORD_MAP[part] || part)
+      .filter(Boolean);
+    const composite = translatedParts.join("-");
+    if (composite) return composite;
+  }
+
+  if (normalized.endsWith("s") && normalized.length > 4) {
+    const singular = normalized.slice(0, -1);
+    const singularMapped = PT_TO_EN_KEYWORD_MAP[singular];
+    if (singularMapped) {
+      return singularMapped.endsWith("s") ? singularMapped : `${singularMapped}s`;
+    }
+  }
+
+  return normalized;
+}
+
+function translateKeywordsToEnglish(keywords: string[], limit = 7): string[] {
+  const seen = new Set<string>();
+  const translated: string[] = [];
+
+  for (const keyword of keywords) {
+    const en = translateKeywordTokenToEnglish(keyword);
+    if (!en) continue;
+    if (SEARCH_STOPWORDS.has(en)) continue;
+    if (seen.has(en)) continue;
+    seen.add(en);
+    translated.push(en);
+    if (translated.length >= Math.max(1, limit)) break;
+  }
+
+  return translated;
+}
+
+function extractSearchKeywords(prompt: string, limit = 6): string[] {
+  const rawTokens = String(prompt || "").toLowerCase().match(KEYWORD_TOKEN_REGEX) || [];
+  const map = new Map<string, { token: string; count: number; firstIndex: number }>();
+
+  rawTokens.forEach((raw, index) => {
+    const token = String(raw || "").trim();
+    if (!token) return;
+
+    const normalized = normalizeKeywordToken(token);
+    if (!normalized) return;
+    if (SEARCH_STOPWORDS.has(normalized)) return;
+
+    const isYear = /^\d{4}$/.test(normalized);
+    if (!isYear && normalized.length < 3 && !SHORT_KEYWORD_ALLOWLIST.has(normalized)) return;
+    if (/^\d+$/.test(normalized) && !isYear && normalized.length < 4) return;
+
+    const prev = map.get(normalized);
+    if (prev) {
+      prev.count += 1;
+      return;
+    }
+
+    map.set(normalized, {
+      token,
+      count: 1,
+      firstIndex: index,
+    });
+  });
+
+  const ranked = [...map.entries()]
+    .map(([normalized, item]) => {
+      let score = item.count * 2;
+      if (item.token.length >= 8) score += 1.1;
+      if (/^\d{4}$/.test(normalized)) score += 0.7;
+      if (SHORT_KEYWORD_ALLOWLIST.has(normalized)) score += 0.4;
+      score += Math.max(0, 1 - item.firstIndex * 0.03);
+
+      return {
+        token: item.token,
+        firstIndex: item.firstIndex,
+        score,
+      };
+    })
+    .sort((a, b) => b.score - a.score || a.firstIndex - b.firstIndex || b.token.length - a.token.length);
+
+  return ranked.slice(0, Math.max(limit, 1)).map((item) => item.token);
+}
+
 function createReasoningTrace(thinkEnabled: boolean, deepSearchEnabled: boolean): ReasoningTrace | null {
   if (!thinkEnabled && !deepSearchEnabled) return null;
 
@@ -72,15 +440,15 @@ function createReasoningTrace(thinkEnabled: boolean, deepSearchEnabled: boolean)
   const optimizerEnabled = deepSearchEnabled && thinkEnabled;
   const title =
     mode === "hybrid"
-      ? "KILLA esta usando THINK + DEEP SEARCH para pensar e buscar fontes..."
+      ? "KILLA esta usando THINK + DEEP SEARCH para pensar e buscar no dataset/web..."
       : mode === "deepsearch"
-        ? "KILLA esta usando DEEP SEARCH para pesquisar na internet..."
+        ? "KILLA esta usando DEEP SEARCH para pesquisar no dataset e na internet..."
         : "KILLA esta usando THINK para pensar profundamente...";
 
   const steps: ReasoningTrace["steps"] = [
     { id: "analyze", label: "Entendendo o contexto do pedido", status: "active" },
     ...(optimizerEnabled ? [{ id: "optimize", label: "Optimizer Enhanced Research", status: "pending" as const }] : []),
-    ...(deepSearchEnabled ? [{ id: "search", label: "Pesquisando fontes na web", status: "pending" as const }] : []),
+    ...(deepSearchEnabled ? [{ id: "search", label: "Pesquisando fontes (dataset + web)", status: "pending" as const }] : []),
     ...(deepSearchEnabled ? [{ id: "review", label: "Revisando fontes relevantes", status: "pending" as const }] : []),
     ...(thinkEnabled ? [{ id: "plan", label: "Estruturando o raciocinio", status: "pending" as const }] : []),
     { id: "answer", label: "Montando resposta final", status: "pending" },
@@ -90,8 +458,83 @@ function createReasoningTrace(thinkEnabled: boolean, deepSearchEnabled: boolean)
     mode,
     title,
     steps,
-    optimizer: optimizerEnabled ? { label: "Optimizer Enhanced Research ativo" } : undefined,
+    optimizer: optimizerEnabled ? { label: "Optimizer Enhanced Research ativo", strategy: "Keyword-first (PT -> EN)" } : undefined,
     optimizedQueries: [],
+    queries: [],
+    sources: [],
+  };
+}
+
+function resolveTextCreditAction(thinkEnabled: boolean, deepSearchEnabled: boolean): BetaAction {
+  if (thinkEnabled && deepSearchEnabled) return "text_think_deepsearch";
+  if (deepSearchEnabled) return "text_deepsearch";
+  if (thinkEnabled) return "text_think";
+  return "text_basic";
+}
+
+function createMediaReasoningTrace(
+  activeTools: string[],
+  ctx?: { imageModelLabel?: string; durationSeconds?: number }
+): ReasoningTrace | null {
+  const wantsCreateImages = activeTools.includes("create-images");
+  const wantsEditImage = activeTools.includes("edit-image");
+  const wantsCreateVideo = activeTools.includes("create-video");
+
+  if (!wantsCreateImages && !wantsEditImage && !wantsCreateVideo) return null;
+
+  if (wantsCreateVideo) {
+    const d = ctx?.durationSeconds ? ` de ${ctx.durationSeconds}s` : "";
+    return {
+      mode: "media",
+      title: `KILLA esta usando CREATE VIDEO para gerar um video${d}...`,
+      steps: [
+        { id: "analyze", label: "Preparando imagem de referencia", status: "active" },
+        { id: "render", label: "Gerando frames do video", status: "pending" },
+        { id: "deliver", label: "Finalizando clipe", status: "pending" },
+      ],
+      queries: [],
+      sources: [],
+    };
+  }
+
+  if (wantsCreateImages && wantsEditImage) {
+    return {
+      mode: "media",
+      title: "KILLA esta usando CREATE IMAGES + EDIT IMAGE para gerar e refinar a imagem...",
+      steps: [
+        { id: "analyze", label: "Interpretando direcao visual", status: "active" },
+        { id: "render", label: "Gerando imagem base", status: "pending" },
+        { id: "edit", label: "Aplicando refinamentos", status: "pending" },
+        { id: "deliver", label: "Finalizando entrega", status: "pending" },
+      ],
+      queries: [],
+      sources: [],
+    };
+  }
+
+  if (wantsEditImage) {
+    return {
+      mode: "media",
+      title: "KILLA esta usando EDIT IMAGE para editar sua imagem...",
+      steps: [
+        { id: "analyze", label: "Analisando imagem de referencia", status: "active" },
+        { id: "edit", label: "Aplicando edicao solicitada", status: "pending" },
+        { id: "deliver", label: "Finalizando imagem editada", status: "pending" },
+      ],
+      queries: [],
+      sources: [],
+    };
+  }
+
+  const suffix = ctx?.imageModelLabel ? ` (${ctx.imageModelLabel})` : "";
+  return {
+    mode: "media",
+    title: `KILLA esta usando CREATE IMAGES para gerar uma imagem${suffix}...`,
+    steps: [
+      { id: "analyze", label: "Interpretando prompt visual", status: "active" },
+      { id: "render", label: "Renderizando imagem", status: "pending" },
+      { id: "deliver", label: "Preparando entrega final", status: "pending" },
+    ],
     queries: [],
     sources: [],
   };
@@ -116,39 +559,61 @@ function buildDeepSearchQueries(
 ): {
   searchQueries: string[];
   optimizedQueries: string[];
+  keywords: string[];
 } {
   const base = String(prompt || "").trim().replace(/\s+/g, " ");
-  if (!base) return { searchQueries: [], optimizedQueries: [] };
+  if (!base) return { searchQueries: [], optimizedQueries: [], keywords: [] };
 
   const year = new Date().getFullYear();
-  const baselineQueries = [
-    base,
-    `${base} atualizado ${year}`,
-    `${base} fontes confiaveis`,
-    `${base} dados oficiais`,
-  ];
+  const ptKeywords = extractSearchKeywords(base, thinkEnabled ? 7 : 6);
+  const translatedKeywords = thinkEnabled ? translateKeywordsToEnglish(ptKeywords, 7) : [];
+  const effectiveKeywords = thinkEnabled && translatedKeywords.length > 0 ? translatedKeywords : ptKeywords;
+  const keywordCluster = effectiveKeywords.slice(0, 5);
+  const primaryCluster = keywordCluster.slice(0, 3).join(" ").trim();
+  const broadCluster = keywordCluster.join(" ").trim();
+  const exactPrimary = keywordCluster
+    .slice(0, 3)
+    .map((word) => `"${word}"`)
+    .join(" ")
+    .trim();
+  const querySeed = primaryCluster || broadCluster || base;
+
+  const baselineQueries = thinkEnabled
+    ? [
+        querySeed,
+        `${broadCluster || querySeed} reliable sources`,
+        `${querySeed} official data`,
+        `${querySeed} latest ${year}`,
+      ]
+    : [
+        querySeed,
+        `${broadCluster || querySeed} fontes confiaveis`,
+        `${querySeed} dados oficiais`,
+        `${querySeed} atualizado ${year}`,
+      ];
 
   if (!thinkEnabled) {
     return {
       searchQueries: dedupeQueries(baselineQueries, 4),
       optimizedQueries: [],
+      keywords: ptKeywords,
     };
   }
 
-  // Think + DeepSearch: create an optimized research strategy to improve result quality.
+  // Think + DeepSearch: keyword-first strategy with PT -> EN translation for higher recall.
   const optimizedQueries = dedupeQueries(
     [
-      `"${base}" fonte oficial`,
-      `${base} comparativo tecnico ${year}`,
-      `${base} benchmark resultados ${year}`,
-      `${base} melhores praticas implementacao`,
-      `${base} riscos e limitacoes`,
+      exactPrimary ? `${exactPrimary} official source` : `${querySeed} official source`,
+      `${querySeed} technical comparison ${year}`,
+      `${querySeed} benchmark results ${year}`,
+      `${querySeed} best practices implementation`,
+      `${querySeed} risks and limitations`,
     ],
     5
   );
 
   const searchQueries = dedupeQueries([...optimizedQueries, ...baselineQueries], 5);
-  return { searchQueries, optimizedQueries };
+  return { searchQueries, optimizedQueries, keywords: effectiveKeywords };
 }
 
 function coerceThreadKind(kind: unknown): ThreadKind {
@@ -167,10 +632,10 @@ function isUntitledTitle(title: string): boolean {
 function buildToolLoadingLabel(toolId: string | null, ctx?: { imageModelLabel?: string; durationSeconds?: number }): string {
   const tool = toolId || "";
   if (tool === "deepsearch+think" || tool === "think+deepsearch") {
-    return "KILLA esta usando THINK + DEEP SEARCH para pensar e pesquisar fontes...";
+    return "KILLA esta usando THINK + DEEP SEARCH para pesquisar no dataset e na web...";
   }
   if (tool === "think") return "KILLA esta usando THINK para pensar profundamente...";
-  if (tool === "deepsearch") return "KILLA esta usando DEEP SEARCH para pesquisar na internet...";
+  if (tool === "deepsearch") return "KILLA esta usando DEEP SEARCH para pesquisar no dataset e na internet...";
   if (tool === "create-images") {
     const suffix = ctx?.imageModelLabel ? ` (${ctx.imageModelLabel})` : "";
     return `KILLA esta usando CREATE IMAGES para gerar uma imagem${suffix}...`;
@@ -208,10 +673,13 @@ Voce e o assistente do KILLA CHAT.
 Regras:
 - Responda sempre em portugues do Brasil.
 - Formate a resposta em Markdown com hierarquia clara (H1, H2, H3), listas curtas e divisorias (---).
-- Seja direto e util. Entregue uma recomendacao principal quando houver escolha.
+- Seja direto e util, mas com profundidade.
+- Entregue em 3 camadas quando fizer sentido: (1) resumo executivo, (2) analise tecnica, (3) plano pratico acionavel.
+- Quando houver escolha, traga recomendacao principal + trade-offs (custo, risco, velocidade, manutencao).
 - Use codigo e comandos sempre em blocos fenced com a linguagem.
 - Quando comparar 2+ opcoes, use tabela Markdown.
-- Nao invente fontes. Se usar informacao externa, deixe claro o que e suposicao.`;
+- Nao invente fontes. Se usar informacao externa, deixe claro o que e suposicao.
+- Termine com proximos passos objetivos quando o pedido for tecnico ou estrategico.`;
 
 type RawPuterModel = {
   id: string;
@@ -334,34 +802,36 @@ function buildToolInstruction(
   if (activeTools.includes("deepsearch")) {
     if (ctx?.deepSearchAvailable === false) {
       instructions.push(
-        "DeepSearch solicitado, mas a busca web falhou/esta indisponivel nesta tentativa. Nao invente fontes/links; responda apenas com conhecimento geral e deixe limites claros."
+        "DeepSearch solicitado, mas a busca (dataset interno + web) falhou/esta indisponivel nesta tentativa. Nao invente fontes/links; responda apenas com conhecimento geral e deixe limites claros."
       );
     } else {
       instructions.push(
-        "Modo DeepSearch ativo: use os resultados de busca fornecidos (Resultados de busca (DeepSearch)) para validar fatos. Inclua uma secao final 'Fontes' com os links utilizados. Nao invente links."
+        "Modo DeepSearch ativo: use os resultados de busca fornecidos (Resultados de busca (DeepSearch)) para validar fatos com prioridade para o dataset interno. Inclua uma secao final 'Fontes' com links usados e, quando houver, identifique fontes do dataset interno. Nao invente links. Estruture com sintese, analise comparativa e conclusao objetiva."
       );
     }
   }
 
   if (activeTools.includes("think")) {
-    instructions.push("Modo Think ativo: faca raciocinio aprofundado antes de responder e destaque premissas e limites.");
+    instructions.push(
+      "Modo Think ativo: faca raciocinio aprofundado antes de responder e destaque premissas, limites, trade-offs e riscos. Entregue resposta final com clareza executiva."
+    );
   }
 
   if (activeTools.includes("create-images")) {
     instructions.push(
-      "Create Images ativo: nao diga que voce nao consegue gerar imagens. Confirme em 1-2 linhas o que sera gerado e mantenha o texto curto."
+      "Create Images ativo: nao diga que voce nao consegue gerar imagens. Confirme em 1-2 linhas o que sera gerado com direcao visual profissional (estilo, luz, enquadramento, atmosfera)."
     );
   }
 
   if (activeTools.includes("edit-image")) {
     instructions.push(
-      "Edit Image ativo: nao diga que voce nao consegue editar imagens. Confirme em 1-2 linhas a edicao solicitada e mantenha o texto curto."
+      "Edit Image ativo: nao diga que voce nao consegue editar imagens. Confirme em 1-2 linhas a edicao solicitada com foco em fidelidade, consistencia visual e qualidade final."
     );
   }
 
   if (activeTools.includes("create-video")) {
     instructions.push(
-      "Create Video ativo: nao diga que voce nao consegue gerar videos. Confirme em 1-2 linhas o video solicitado e mantenha o texto curto."
+      "Create Video ativo: nao diga que voce nao consegue gerar videos. Confirme em 1-2 linhas o video solicitado com direcao cinematografica (movimento de camera, ritmo, atmosfera)."
     );
   }
 
@@ -647,13 +1117,13 @@ function parseRequestedVideoResolution(text: string): {
 }
 
 function isYes(text: string): boolean {
-  const t = text.trim().toLowerCase();
-  return /^(sim|s|confirmar|confirmo|ok|bora)\b/.test(t);
+  const t = stripDiacritics(String(text || "")).trim().toLowerCase();
+  return /^(sim|confirmar|confirmo|ok|bora)\b/.test(t);
 }
 
 function isNo(text: string): boolean {
-  const t = text.trim().toLowerCase();
-  return /^(nao|não|cancelar|cancela|pare|stop)\b/.test(t);
+  const t = stripDiacritics(String(text || "")).trim().toLowerCase();
+  return /^(nao|cancelar|cancela|pare|stop)\b/.test(t);
 }
 function getLatestImageUrl(messages: ChatMessage[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -781,6 +1251,113 @@ async function fileToDataUrl(file: File): Promise<string> {
   }
 }
 
+async function reframeImageForVideoAspect(dataUrl: string, aspectRatio: VideoAspectRatio): Promise<string> {
+  const src = String(dataUrl || "").trim();
+  if (!src) return src;
+
+  const targetRatio = videoAspectRatioToNumber(aspectRatio);
+  if (!Number.isFinite(targetRatio) || targetRatio <= 0) return src;
+
+  const loadImage = (url: string) =>
+    new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image();
+      img.decoding = "async";
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("Falha ao preparar imagem de referencia para video."));
+      img.src = url;
+    });
+
+  const readAsDataUrl = (blob: Blob) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Falha ao ler a imagem convertida."));
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.readAsDataURL(blob);
+    });
+
+  const img = await loadImage(src);
+  const srcW = img.naturalWidth || img.width || 0;
+  const srcH = img.naturalHeight || img.height || 0;
+  if (!srcW || !srcH) return src;
+
+  const currentRatio = srcW / srcH;
+  if (Math.abs(currentRatio - targetRatio) <= 0.012) return src;
+
+  const maxLong = 1536;
+  const longBase = Math.min(maxLong, Math.max(srcW, srcH));
+  let outW = targetRatio >= 1 ? longBase : Math.round(longBase * targetRatio);
+  let outH = targetRatio >= 1 ? Math.round(longBase / targetRatio) : longBase;
+
+  outW = Math.max(256, outW);
+  outH = Math.max(256, outH);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return src;
+
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, outW, outH);
+
+  const scale = Math.min(outW / srcW, outH / srcH);
+  const drawW = Math.max(1, Math.round(srcW * scale));
+  const drawH = Math.max(1, Math.round(srcH * scale));
+  const dx = Math.round((outW - drawW) / 2);
+  const dy = Math.round((outH - drawH) / 2);
+  ctx.drawImage(img, dx, dy, drawW, drawH);
+
+  const blob = await new Promise<Blob | null>((resolve) => {
+    canvas.toBlob((b) => resolve(b), "image/jpeg", 0.9);
+  });
+  if (!blob) return src;
+  return await readAsDataUrl(blob);
+}
+
+async function probeVideoMetadata(
+  url: string,
+  timeoutMs = 15000
+): Promise<{ duration: number; width: number; height: number } | null> {
+  const src = String(url || "").trim();
+  if (!src) return null;
+
+  return await new Promise((resolve) => {
+    const video = document.createElement("video");
+    let done = false;
+    const settle = (value: { duration: number; width: number; height: number } | null) => {
+      if (done) return;
+      done = true;
+      video.removeAttribute("src");
+      video.load();
+      resolve(value);
+    };
+
+    const t = window.setTimeout(() => settle(null), timeoutMs);
+    const clear = () => window.clearTimeout(t);
+
+    video.preload = "metadata";
+    video.muted = true;
+    video.playsInline = true;
+    video.crossOrigin = "anonymous";
+    video.onloadedmetadata = () => {
+      clear();
+      const duration = Number(video.duration);
+      const width = Number(video.videoWidth);
+      const height = Number(video.videoHeight);
+      if (!Number.isFinite(duration) || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+        settle(null);
+        return;
+      }
+      settle({ duration, width, height });
+    };
+    video.onerror = () => {
+      clear();
+      settle(null);
+    };
+    video.src = src;
+  });
+}
+
 async function apiJson<T>(url: string, body: unknown, token?: string | null, signal?: AbortSignal): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -803,6 +1380,34 @@ async function apiJson<T>(url: string, body: unknown, token?: string | null, sig
     throw err;
   }
   return data as T;
+}
+
+async function apiGetJson<T>(url: string, token?: string | null, signal?: AbortSignal): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: Object.keys(headers).length ? headers : undefined,
+    signal,
+  });
+  const text = await res.text();
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { success: false, error: text };
+  }
+  if (!res.ok) {
+    const err = new Error(data?.error || data?.message || `HTTP ${res.status}`);
+    (err as any).payload = data;
+    throw err;
+  }
+  return data as T;
+}
+
+function readApiErrorPayload(error: unknown): any {
+  if (!error || typeof error !== "object") return null;
+  return (error as any).payload || null;
 }
 
 async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -837,9 +1442,20 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 async function pollVideo(
   requestId: string,
-  token?: string | null,
+  token?: string | null | (() => Promise<string | null>),
   signal?: AbortSignal
 ): Promise<{ url: string; duration?: number }> {
+  const resolveToken = async (): Promise<string | null> => {
+    if (typeof token === "function") {
+      try {
+        return (await token()) || null;
+      } catch {
+        return null;
+      }
+    }
+    return token || null;
+  };
+
   const maxAttempts = 120;
   for (let i = 0; i < maxAttempts; i++) {
     // eslint-disable-next-line no-await-in-loop
@@ -849,13 +1465,49 @@ async function pollVideo(
       (e as any).name = "AbortError";
       throw e;
     }
+    let currentToken = await resolveToken();
     const headers: Record<string, string> = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
+    if (currentToken) headers.Authorization = `Bearer ${currentToken}`;
     const res = await fetch(`/api/video/status/${encodeURIComponent(requestId)}`, {
       method: "GET",
       headers: Object.keys(headers).length ? headers : undefined,
       signal,
     });
+
+    if (res.status === 401 && typeof token === "function") {
+      // Session tokens can expire while polling long video jobs; retry once with a refreshed token.
+      currentToken = await resolveToken();
+      if (!currentToken) {
+        throw new Error("Sessao expirada durante a geracao do video. Faca login novamente e tente de novo.");
+      }
+      const retryRes = await fetch(`/api/video/status/${encodeURIComponent(requestId)}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${currentToken}` },
+        signal,
+      });
+      if (!retryRes.ok) {
+        if (retryRes.status === 401) {
+          throw new Error("Sessao expirada durante a geracao do video. Faca login novamente e tente de novo.");
+        }
+        throw new Error(`Falha ao consultar status do video (HTTP ${retryRes.status}).`);
+      }
+      const retryData = await retryRes.json();
+      if (retryData.status === "done" && retryData.video?.url) {
+        return { url: String(retryData.video.url), duration: retryData.video.duration };
+      }
+      if (retryData.status === "expired" || retryData.status === "error") {
+        throw new Error(retryData.error || "Video falhou/expirou.");
+      }
+      continue;
+    }
+
+    if (!res.ok) {
+      if (res.status === 401) {
+        throw new Error("Sessao expirada durante a geracao do video. Faca login novamente e tente de novo.");
+      }
+      throw new Error(`Falha ao consultar status do video (HTTP ${res.status}).`);
+    }
+
     const data = await res.json();
 
     if (data.status === "done" && data.video?.url) {
@@ -869,7 +1521,7 @@ async function pollVideo(
 }
 
 export default function App() {
-  const { getToken } = useAuth();
+  const { getToken, isLoaded: authLoaded } = useAuth();
   const clerk = useClerk();
   const initial = useMemo(() => loadThreadsFromStorage(), []);
 
@@ -908,15 +1560,21 @@ export default function App() {
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
+  const [betaAccess, setBetaAccess] = useState<BetaAccessState | null>(null);
+  const [betaCheckout, setBetaCheckout] = useState<BetaCheckoutState | null>(null);
+  const [betaLoading, setBetaLoading] = useState(true);
+  const [betaGateError, setBetaGateError] = useState("");
+  const [betaRedeeming, setBetaRedeeming] = useState(false);
 
   const [pendingImages, setPendingImages] = useState<PendingImageAttachment[]>([]);
   type PendingVideoConfirm = {
     prompt: string;
+    sourceImageDataUrl: string;
     imageDataUrl: string;
     duration: number;
     aspect_ratio: VideoAspectRatio;
     resolution: VideoResolution;
-    provider: "xai" | "replicate";
     model_id?: string;
   };
   const [pendingVideoConfirms, setPendingVideoConfirms] = useState<Record<string, PendingVideoConfirm>>({});
@@ -929,15 +1587,66 @@ export default function App() {
     }
     return "seedream-4.5";
   });
-  const [videoModel, setVideoModel] = useState<"xai-grok-imagine-video" | "replicate-grok-imagine-video">(() => {
+  const [videoModel, setVideoModel] = useState<"modelslab-grok-imagine-video-i2v">(() => {
     try {
       const raw = String(localStorage.getItem(STORAGE_VIDEO_MODEL) || "").trim();
-      if (raw === "xai-grok-imagine-video" || raw === "replicate-grok-imagine-video") return raw;
+      if (raw === "modelslab-grok-imagine-video-i2v") return raw;
+      if (raw === "xai-grok-imagine-video" || raw === "replicate-grok-imagine-video") return "modelslab-grok-imagine-video-i2v";
     } catch {
       // ignore
     }
-    return "replicate-grok-imagine-video";
+    return "modelslab-grok-imagine-video-i2v";
   });
+
+  const refreshBetaAccess = async (tokenOverride?: string | null, signal?: AbortSignal) => {
+    const token = tokenOverride ?? (await getToken().catch(() => null));
+    if (!token) {
+      setBetaAccess(null);
+      setBetaCheckout(null);
+      setBetaLoading(false);
+      return null;
+    }
+
+    const response = await apiGetJson<{ success: boolean; access: BetaAccessState; checkout: BetaCheckoutState }>(
+      "/api/beta/access",
+      token,
+      signal
+    );
+    setBetaAccess(response.access);
+    setBetaCheckout(response.checkout || null);
+    setBetaLoading(false);
+    return response.access;
+  };
+
+  const postBetaCharge = async (
+    action: BetaAction,
+    operationId: string,
+    token: string,
+    signal?: AbortSignal
+  ): Promise<{ charge_id: string; access: BetaAccessState }> => {
+    const response = await apiJson<{ success: boolean; charge_id: string; access: BetaAccessState }>(
+      "/api/beta/charge",
+      { action, operation_id: operationId },
+      token,
+      signal
+    );
+    if (response.access) setBetaAccess(response.access);
+    return { charge_id: response.charge_id, access: response.access };
+  };
+
+  const postBetaRefund = async (chargeId: string, reason: string, token: string): Promise<void> => {
+    if (!chargeId) return;
+    try {
+      const response = await apiJson<{ success: boolean; access: BetaAccessState }>(
+        "/api/beta/refund",
+        { charge_id: chargeId, reason },
+        token
+      );
+      if (response.access) setBetaAccess(response.access);
+    } catch {
+      // Refund failure should not break the UX flow.
+    }
+  };
   const [modelToggleCompatById, setModelToggleCompatById] = useState<Record<string, ModelToggleCompat>>(() => {
     try {
       const raw = localStorage.getItem(STORAGE_MODEL_TOGGLE_COMPAT);
@@ -1129,6 +1838,29 @@ export default function App() {
     void runModelToggleCompatibilityCheck(model);
   }, [connected, modelsLoading, model, modelToggleCompatById]);
 
+  useEffect(() => {
+    if (!authLoaded) return;
+    let cancelled = false;
+    const controller = new AbortController();
+
+    void (async () => {
+      try {
+        setBetaLoading(true);
+        await refreshBetaAccess(undefined, controller.signal);
+      } catch {
+        if (!cancelled) {
+          setBetaLoading(false);
+          setBetaGateError("Falha ao carregar status da licenca. Tente atualizar a pagina.");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [authLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const canSend = useMemo(() => trimmed.length > 0 && !thinking, [trimmed, thinking]);
 
   const updateThread = (id: string, updater: (t: ChatThread) => ChatThread) => {
@@ -1226,6 +1958,18 @@ export default function App() {
 
   const setReasoningOptimizedQueries = (assistantId: string, queries: string[]) => {
     patchReasoningTrace(assistantId, (trace) => ({ ...trace, optimizedQueries: queries.slice(0, 5) }));
+  };
+
+  const setReasoningOptimizerKeywords = (assistantId: string, keywords: string[]) => {
+    patchReasoningTrace(assistantId, (trace) => ({
+      ...trace,
+      optimizer: trace.optimizer
+        ? {
+            ...trace.optimizer,
+            keywords: dedupeQueries(keywords, 8),
+          }
+        : trace.optimizer,
+    }));
   };
 
   const setReasoningSources = (assistantId: string, sources: Array<{ title: string; url?: string }>) => {
@@ -1397,11 +2141,6 @@ export default function App() {
   };
 
   const toggleTool = (toolId: string) => {
-    // Create Video defaults to Replicate provider.
-    if (toolId === "create-video") {
-      setVideoModel("replicate-grok-imagine-video");
-    }
-
     setActiveTools((prev) => {
       const current = normalizeToolSelection(prev);
       const isActive = current.includes(toolId);
@@ -1525,6 +2264,13 @@ export default function App() {
   const sendMessage = async () => {
     if (!canSend || !activeThread) return;
 
+    if (betaLoading) return;
+    let accessSnapshot = betaAccess;
+    if (accessSnapshot && !accessSnapshot.licensed) {
+      setBetaGateError("Ative sua chave de licenca para usar o KILLA AI.");
+      return;
+    }
+
     const clerkToken = await getToken().catch(() => null);
     if (!clerkToken) {
       appendToActive([
@@ -1535,6 +2281,27 @@ export default function App() {
           createdAt: Date.now(),
         },
       ]);
+      return;
+    }
+
+    if (!accessSnapshot) {
+      try {
+        accessSnapshot = await refreshBetaAccess(clerkToken);
+      } catch {
+        appendToActive([
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            text: "Nao foi possivel validar sua licenca agora. Tente novamente em alguns segundos.",
+            createdAt: Date.now(),
+          },
+        ]);
+        return;
+      }
+    }
+
+    if (accessSnapshot && !accessSnapshot.licensed) {
+      setBetaGateError("Ative sua chave de licenca para continuar.");
       return;
     }
 
@@ -1603,7 +2370,16 @@ export default function App() {
       const durationToUse = Math.min(Math.max(requestedDuration ?? pendingConfirm.duration, 1), 15);
       const aspectToUse = requestedAspect.value ?? pendingConfirm.aspect_ratio;
       const resolutionToUse = requestedResolution.value ?? pendingConfirm.resolution;
-      const imageToUse = attachedImageDataUrl || pendingConfirm.imageDataUrl;
+      const sourceImageToUse = attachedImageDataUrl || pendingConfirm.sourceImageDataUrl || pendingConfirm.imageDataUrl;
+      let imageToUse = pendingConfirm.imageDataUrl;
+      const mustReframe = Boolean(sourceImageToUse) && (Boolean(attachedImageDataUrl) || requestedAspect.value !== null || !imageToUse);
+      if (mustReframe && sourceImageToUse) {
+        try {
+          imageToUse = await reframeImageForVideoAspect(sourceImageToUse, aspectToUse);
+        } catch {
+          imageToUse = sourceImageToUse;
+        }
+      }
       const didUpdate =
         Boolean(attachedImageDataUrl) ||
         requestedDuration !== null ||
@@ -1618,6 +2394,7 @@ export default function App() {
             duration: durationToUse,
             aspect_ratio: aspectToUse,
             resolution: resolutionToUse,
+            sourceImageDataUrl: sourceImageToUse || prev[threadId].sourceImageDataUrl,
             imageDataUrl: imageToUse,
           },
         }));
@@ -1638,9 +2415,9 @@ export default function App() {
         const durationLine =
           requestedDuration && requestedDuration > 15
             ? `Voce pediu ${requestedDuration}s, mas o maximo e 15s. Posso gerar com 15s.`
-            : didUpdate
-              ? `Vou gerar um video de ${durationToUse}s em ${aspectToUse} (${resolutionToUse}).`
-              : "";
+              : didUpdate
+                ? `Vou gerar um video de ${durationToUse}s em ${aspectToUse} (${resolutionToUse}).`
+                : "";
 
         updateMessageInThread(threadId, assistantId, {
           text:
@@ -1651,6 +2428,27 @@ export default function App() {
             `Proporcoes disponiveis: ${videoAspectOptions}.\n` +
             `Resolucoes disponiveis: ${videoResolutionOptions}.\n\n` +
             "Para confirmar o video, responda `sim`. Para abortar, responda `cancelar`.",
+        });
+        return;
+      }
+
+      let videoChargeId = "";
+      try {
+        const charge = await postBetaCharge(
+          "video_generate",
+          `video:${threadId}:${assistantId}:${Date.now()}`,
+          clerkToken
+        );
+        videoChargeId = charge.charge_id;
+      } catch (error) {
+        const payload = readApiErrorPayload(error);
+        const code = String(payload?.code || "");
+        const msg =
+          code === "INSUFFICIENT_CREDITS"
+            ? "Creditos insuficientes para gerar video. Necessario: 10 creditos."
+            : getErrorMessage(error);
+        updateMessageInThread(threadId, assistantId, {
+          text: `Aviso: ${msg}`,
         });
         return;
       }
@@ -1673,6 +2471,8 @@ export default function App() {
       updateMessageInThread(threadId, assistantId, {
         text: buildToolLoadingLabel("create-video", { durationSeconds: durationToUse }),
       });
+      const videoTrace = createMediaReasoningTrace(["create-video"], { durationSeconds: durationToUse });
+      if (videoTrace) upsertReasoningTrace(assistantId, videoTrace);
 
       try {
         const gen = await apiJson<{ success: boolean; request_id: string }>(
@@ -1683,7 +2483,6 @@ export default function App() {
             duration: durationToUse,
             aspect_ratio: aspectToUse,
             resolution: resolutionToUse,
-            provider: pendingConfirm.provider || "xai",
             video_model_id: pendingConfirm.model_id || undefined,
           },
           clerkToken,
@@ -1692,9 +2491,40 @@ export default function App() {
 
         if (signal.aborted) return;
         if (!gen.request_id) throw new Error("Sem request_id retornado pelo backend.");
+        markReasoningStep(assistantId, "analyze", "done", "Referencia validada");
+        markReasoningStep(assistantId, "render", "active");
 
-        const done = await pollVideo(gen.request_id, clerkToken, signal);
+        const done = await pollVideo(
+          gen.request_id,
+          async () => await getToken().catch(() => null),
+          signal
+        );
         if (signal.aborted) return;
+
+        const meta = await probeVideoMetadata(done.url);
+        const reportedDuration = Number(done.duration);
+        const actualDuration = Number.isFinite(reportedDuration) && reportedDuration > 0 ? reportedDuration : meta?.duration;
+        if (typeof actualDuration === "number" && Number.isFinite(actualDuration)) {
+          const durationDiff = Math.abs(actualDuration - durationToUse);
+          if (durationDiff > 0.75) {
+            throw new Error(
+              `Duracao divergente: solicitado ${durationToUse}s, retornado ${actualDuration.toFixed(2)}s.`
+            );
+          }
+        }
+        if (meta) {
+          const expectedRatio = videoAspectRatioToNumber(aspectToUse);
+          const actualRatio = meta.width / meta.height;
+          const relDiff = Math.abs(actualRatio - expectedRatio) / expectedRatio;
+          if (relDiff > 0.08) {
+            throw new Error(
+              `Proporcao divergente: solicitado ${aspectToUse}, retornado ${meta.width}x${meta.height}.`
+            );
+          }
+        }
+
+        markReasoningStep(assistantId, "render", "done", "Frames concluidos");
+        markReasoningStep(assistantId, "deliver", "active");
 
         addAttachmentsToMessageInThread(threadId, assistantId, [
           {
@@ -1704,13 +2534,24 @@ export default function App() {
             createdAt: Date.now(),
           },
         ]);
+        markReasoningStep(assistantId, "deliver", "done", "Video pronto");
 
         setPendingVideoConfirms((prev) => {
           const { [threadId]: _d, ...rest } = prev;
           return rest;
         });
       } catch (e) {
-        if (isAbortError(e) || signal.aborted) return;
+        if (isAbortError(e) || signal.aborted) {
+          if (videoChargeId) {
+            await postBetaRefund(videoChargeId, "video_generation_cancelled", clerkToken);
+          }
+          return;
+        }
+        if (videoChargeId) {
+          await postBetaRefund(videoChargeId, "video_generation_failed", clerkToken);
+        }
+        markReasoningStep(assistantId, "render", "done", "Falha na geracao");
+        markReasoningStep(assistantId, "deliver", "done", "Erro no processamento");
         updateMessageInThread(threadId, assistantId, {
           text: `Aviso: Falha ao gerar video: ${e instanceof Error ? e.message : "erro desconhecido"}`,
         });
@@ -1721,6 +2562,7 @@ export default function App() {
           setThinking(false);
           setTypingAssistantId((cur) => (cur === assistantId ? null : cur));
         }
+        clearReasoningTrace(assistantId);
       }
 
       return;
@@ -1734,9 +2576,7 @@ export default function App() {
     const wantsCreateImages = activeTools.includes("create-images");
     const wantsEditImage = activeTools.includes("edit-image");
     const wantsCreateVideo = activeTools.includes("create-video");
-    const selectedVideoProvider: "xai" | "replicate" =
-      videoModel === "replicate-grok-imagine-video" ? "replicate" : "xai";
-    const selectedVideoModelId = videoModel === "replicate-grok-imagine-video" ? "xai/grok-imagine-video" : undefined;
+    const selectedVideoModelId = videoModel === "modelslab-grok-imagine-video-i2v" ? "grok-imagine-video-i2v" : undefined;
 
     // Create Video always asks for confirmation before consuming credits/time.
     if (wantsCreateVideo) {
@@ -1777,6 +2617,12 @@ export default function App() {
       const duration = Math.min(Math.max(desired, 1), 15);
       const aspectRatio: VideoAspectRatio = requestedAspect.value ?? "16:9";
       const resolution: VideoResolution = requestedResolution.value ?? "720p";
+      let preparedVideoRef = attachedImageDataUrl;
+      try {
+        preparedVideoRef = await reframeImageForVideoAspect(attachedImageDataUrl, aspectRatio);
+      } catch {
+        preparedVideoRef = attachedImageDataUrl;
+      }
 
       const unsupportedNotes: string[] = [];
       if (requestedAspect.requested && !requestedAspect.value) {
@@ -1819,11 +2665,11 @@ export default function App() {
         ...prev,
         [threadId]: {
           prompt: promptText,
-          imageDataUrl: attachedImageDataUrl,
+          sourceImageDataUrl: attachedImageDataUrl,
+          imageDataUrl: preparedVideoRef,
           duration,
           aspect_ratio: aspectRatio,
           resolution,
-          provider: selectedVideoProvider,
           model_id: selectedVideoModelId,
         },
       }));
@@ -1879,6 +2725,14 @@ export default function App() {
     const controller = new AbortController();
     const signal = controller.signal;
     inflightRef.current = { threadId, assistantId, prompt: promptText, pendingImages, controller };
+    const deepSearchEnabled = activeTools.includes("deepsearch");
+    const thinkEnabled = activeTools.includes("think");
+    const textReasoningTrace = createReasoningTrace(thinkEnabled, deepSearchEnabled);
+    const mediaReasoningTrace = textReasoningTrace
+      ? null
+      : createMediaReasoningTrace(activeTools, { imageModelLabel: usedImageModelLabel });
+    const initialReasoningTrace = textReasoningTrace || mediaReasoningTrace;
+    if (initialReasoningTrace) upsertReasoningTrace(assistantId, initialReasoningTrace);
 
     const mediaJobs: Promise<void>[] = [];
 
@@ -1887,7 +2741,19 @@ export default function App() {
 
     if (wantsCreateImages) {
       createImagesPromise = (async () => {
+        let createImageChargeId = "";
         try {
+          const charge = await postBetaCharge(
+            "image_generate",
+            `img_gen:${threadId}:${assistantId}:${Date.now()}`,
+            clerkToken,
+            signal
+          );
+          createImageChargeId = charge.charge_id;
+
+          markReasoningStep(assistantId, "analyze", "done");
+          markReasoningStep(assistantId, "render", "active");
+
           const data = await apiJson<{ success: boolean; urls: string[] }>(
             "/api/image/generate",
             {
@@ -1914,10 +2780,27 @@ export default function App() {
             : [];
 
           if (attachments.length > 0) addAttachmentsToMessageInThread(threadId, assistantId, attachments);
+          markReasoningStep(assistantId, "render", "done", attachments.length ? "Imagem gerada" : "Sem imagem retornada");
+          if (wantsEditImage) {
+            markReasoningStep(assistantId, "edit", "active");
+          } else {
+            markReasoningStep(assistantId, "deliver", "active");
+            markReasoningStep(assistantId, "deliver", "done", attachments.length ? "Imagem pronta" : "Sem resultado");
+          }
 
           return attachments[0]?.url || null;
         } catch (e) {
-          if (isAbortError(e) || signal.aborted) return null;
+          if (isAbortError(e) || signal.aborted) {
+            if (createImageChargeId) {
+              await postBetaRefund(createImageChargeId, "image_generation_cancelled", clerkToken);
+            }
+            return null;
+          }
+          if (createImageChargeId) {
+            await postBetaRefund(createImageChargeId, "image_generation_failed", clerkToken);
+          }
+          markReasoningStep(assistantId, "render", "done", "Falha na geracao");
+          markReasoningStep(assistantId, "deliver", "done", "Erro no processamento");
           throw e;
         }
       })();
@@ -1928,7 +2811,11 @@ export default function App() {
     if (wantsEditImage) {
       mediaJobs.push(
         (async () => {
+          let editChargeId = "";
           try {
+            if (!wantsCreateImages) {
+              markReasoningStep(assistantId, "analyze", "active");
+            }
             const generated = createImagesPromise ? await createImagesPromise : null;
             if (signal.aborted) return;
 
@@ -1943,6 +2830,9 @@ export default function App() {
                     : [];
 
             if (imageSources.length === 0) {
+              markReasoningStep(assistantId, "analyze", "done", "Sem imagem de referencia");
+              markReasoningStep(assistantId, "edit", "done", "Edicao nao iniciada");
+              markReasoningStep(assistantId, "deliver", "done", "Aguardando imagem");
               appendTextToMessageInThread(
                 threadId,
                 assistantId,
@@ -1950,6 +2840,16 @@ export default function App() {
               );
               return;
             }
+            markReasoningStep(assistantId, "analyze", "done", `${imageSources.length} referencia(s) carregada(s)`);
+            markReasoningStep(assistantId, "edit", "active");
+
+            const charge = await postBetaCharge(
+              "image_edit",
+              `img_edit:${threadId}:${assistantId}:${Date.now()}`,
+              clerkToken,
+              signal
+            );
+            editChargeId = charge.charge_id;
 
             const imagePayload = imageSources.length === 1 ? imageSources[0] : imageSources;
 
@@ -1981,8 +2881,21 @@ export default function App() {
               : [];
 
             if (attachments.length > 0) addAttachmentsToMessageInThread(threadId, assistantId, attachments);
+            markReasoningStep(assistantId, "edit", "done", attachments.length ? "Edicao concluida" : "Sem imagem retornada");
+            markReasoningStep(assistantId, "deliver", "active");
+            markReasoningStep(assistantId, "deliver", "done", attachments.length ? "Imagem editada pronta" : "Sem resultado");
           } catch (e) {
-            if (isAbortError(e) || signal.aborted) return;
+            if (isAbortError(e) || signal.aborted) {
+              if (editChargeId) {
+                await postBetaRefund(editChargeId, "image_edit_cancelled", clerkToken);
+              }
+              return;
+            }
+            if (editChargeId) {
+              await postBetaRefund(editChargeId, "image_edit_failed", clerkToken);
+            }
+            markReasoningStep(assistantId, "edit", "done", "Falha na edicao");
+            markReasoningStep(assistantId, "deliver", "done", "Erro no processamento");
             throw e;
           }
         })()
@@ -1994,11 +2907,6 @@ export default function App() {
 
     const modelForText = models.some((m) => m.id === model) ? model : pickDefaultModelId(models);
     if (modelForText !== model) setModel(modelForText);
-
-    const deepSearchEnabled = activeTools.includes("deepsearch");
-    const thinkEnabled = activeTools.includes("think");
-    const reasoningTrace = createReasoningTrace(thinkEnabled, deepSearchEnabled);
-    if (reasoningTrace) upsertReasoningTrace(assistantId, reasoningTrace);
 
     const runTextJob = async () => {
       if (signal.aborted) return;
@@ -2019,6 +2927,33 @@ export default function App() {
         return;
       }
 
+      const textAction = resolveTextCreditAction(thinkEnabled, deepSearchEnabled);
+      let textChargeId = "";
+      const refundTextCharge = async (reason: string) => {
+        if (!textChargeId) return;
+        const current = textChargeId;
+        textChargeId = "";
+        await postBetaRefund(current, reason, clerkToken);
+      };
+      try {
+        const charge = await postBetaCharge(
+          textAction,
+          `text:${threadId}:${assistantId}:${Date.now()}`,
+          clerkToken,
+          signal
+        );
+        textChargeId = charge.charge_id;
+      } catch (error) {
+        const payload = readApiErrorPayload(error);
+        const code = String(payload?.code || "");
+        const msg =
+          code === "INSUFFICIENT_CREDITS"
+            ? "Creditos insuficientes para enviar esta mensagem."
+            : getErrorMessage(error);
+        updateMessageInThread(threadId, assistantId, { text: `Aviso: ${msg}` });
+        return;
+      }
+
       const openAIModel = isLikelyOpenAIModel(modelForText);
 
       const preludeNotes: string[] = [];
@@ -2030,6 +2965,33 @@ export default function App() {
         total_sources?: number;
       };
       type WebSearchResponse = { success: boolean; results?: WebSearchResult[]; trace?: WebSearchTrace; error?: string };
+      type KnowledgeSearchResult = {
+        id?: string;
+        title?: string;
+        url?: string;
+        snippet?: string;
+        type?: string;
+      };
+      type KnowledgeSearchTrace = {
+        engine?: string;
+        queries?: string[];
+        keywords?: string[];
+        total_items?: number;
+        matched_items?: number;
+      };
+      type KnowledgeSearchResponse = {
+        success: boolean;
+        results?: KnowledgeSearchResult[];
+        trace?: KnowledgeSearchTrace;
+        error?: string;
+      };
+      type DeepSource = {
+        origin: "knowledge" | "web";
+        title: string;
+        url?: string;
+        snippet?: string;
+        typeLabel?: string;
+      };
 
       let deepSearchAvailable = !deepSearchEnabled;
       let searchContext = "";
@@ -2040,60 +3002,170 @@ export default function App() {
           text: thinkEnabled ? buildToolLoadingLabel("deepsearch+think") : buildToolLoadingLabel("deepsearch"),
         });
         try {
-          const { searchQueries, optimizedQueries } = buildDeepSearchQueries(promptText, thinkEnabled);
+          const { searchQueries, optimizedQueries, keywords } = buildDeepSearchQueries(promptText, thinkEnabled);
+
+          if (thinkEnabled && keywords.length > 0) {
+            setReasoningOptimizerKeywords(assistantId, keywords);
+          }
 
           if (thinkEnabled && optimizedQueries.length > 0) {
             markReasoningStep(assistantId, "optimize", "active");
             setReasoningOptimizedQueries(assistantId, optimizedQueries);
-            markReasoningStep(assistantId, "optimize", "done", `${optimizedQueries.length} estrategias`);
+            markReasoningStep(assistantId, "optimize", "done", `${optimizedQueries.length} estrategias keyword-first`);
           }
 
           markReasoningStep(assistantId, "search", "active");
           setReasoningQueries(assistantId, searchQueries);
 
-          const data = await apiJson<WebSearchResponse>(
-            "/api/web/search",
-            {
-              query: promptText,
-              queries: searchQueries,
-              max_results: 4,
-            },
-            clerkToken,
-            signal
-          );
+          const mergedSources: DeepSource[] = [];
+          const seenSourceKeys = new Set<string>();
+          const addSource = (candidate: DeepSource) => {
+            const normalizedTitle = String(candidate.title || "").trim();
+            if (!normalizedTitle) return;
+            const normalizedUrl = String(candidate.url || "").trim();
+            const key = normalizedUrl
+              ? normalizedUrl.toLowerCase()
+              : `${candidate.origin}:${normalizedTitle.toLowerCase()}:${String(candidate.typeLabel || "").toLowerCase()}`;
+            if (seenSourceKeys.has(key)) return;
+            seenSourceKeys.add(key);
+            mergedSources.push({
+              ...candidate,
+              title: normalizedTitle,
+              url: normalizedUrl || undefined,
+              snippet: String(candidate.snippet || "").trim() || undefined,
+            });
+          };
 
-          if (Array.isArray(data.trace?.queries) && data.trace?.queries.length > 0) {
-            setReasoningQueries(assistantId, data.trace.queries);
+          let knowledgeCount = 0;
+          let webCount = 0;
+          let knowledgeFailed = false;
+          let webFailed = false;
+          let knowledgeEngine = "";
+
+          try {
+            const knowledgeData = await apiJson<KnowledgeSearchResponse>(
+              "/api/knowledge/search",
+              {
+                query: searchQueries[0] || promptText,
+                queries: searchQueries,
+                keywords,
+                max_results: 6,
+              },
+              clerkToken,
+              signal
+            );
+
+            if (Array.isArray(knowledgeData.trace?.queries) && knowledgeData.trace.queries.length > 0) {
+              setReasoningQueries(assistantId, knowledgeData.trace.queries);
+            }
+            knowledgeEngine = typeof knowledgeData.trace?.engine === "string" ? knowledgeData.trace.engine : "";
+
+            const knowledgeResults = Array.isArray(knowledgeData.results) ? knowledgeData.results : [];
+            const before = mergedSources.length;
+            for (const item of knowledgeResults) {
+              if (!item || typeof item.title !== "string") continue;
+              addSource({
+                origin: "knowledge",
+                title: item.title,
+                url: typeof item.url === "string" ? item.url : undefined,
+                snippet: typeof item.snippet === "string" ? item.snippet : undefined,
+                typeLabel: typeof item.type === "string" ? item.type : undefined,
+              });
+            }
+            knowledgeCount = mergedSources.length - before;
+          } catch (error) {
+            if (isAbortError(error) || signal.aborted) return;
+            knowledgeFailed = true;
           }
 
-          const results = Array.isArray(data.results) ? data.results : [];
-          const usable = results
-            .filter((r) => r && typeof r.url === "string" && r.url.startsWith("http") && typeof r.title === "string")
-            .slice(0, 8);
+          const shouldUseWebFallback = mergedSources.length < 4;
+          if (shouldUseWebFallback) {
+            try {
+              const data = await apiJson<WebSearchResponse>(
+                "/api/web/search",
+                {
+                  query: searchQueries[0] || promptText,
+                  queries: searchQueries,
+                  max_results: 4,
+                },
+                clerkToken,
+                signal
+              );
+
+              if (Array.isArray(data.trace?.queries) && data.trace?.queries.length > 0) {
+                setReasoningQueries(assistantId, data.trace.queries);
+              }
+
+              const results = Array.isArray(data.results) ? data.results : [];
+              const before = mergedSources.length;
+              for (const result of results) {
+                if (!result || typeof result.title !== "string") continue;
+                if (typeof result.url !== "string" || !result.url.startsWith("http")) continue;
+                addSource({
+                  origin: "web",
+                  title: result.title,
+                  url: result.url,
+                  snippet: typeof result.snippet === "string" ? result.snippet : undefined,
+                });
+              }
+              webCount = mergedSources.length - before;
+            } catch (error) {
+              if (isAbortError(error) || signal.aborted) return;
+              webFailed = true;
+            }
+          }
+
+          const usable = mergedSources.slice(0, 8);
 
           if (usable.length > 0) {
             deepSearchAvailable = true;
-            markReasoningStep(assistantId, "search", "done");
+            const sourceMix: string[] = [];
+            if (knowledgeCount > 0) sourceMix.push(`${knowledgeCount} fonte(s) internas`);
+            if (webCount > 0) sourceMix.push(`${webCount} fonte(s) web`);
+            markReasoningStep(assistantId, "search", "done", sourceMix.join(" + ") || `${usable.length} fontes`);
             markReasoningStep(assistantId, "review", "active");
             setReasoningSources(
               assistantId,
-              usable.map((item) => ({ title: item.title, url: item.url }))
+              usable.map((item) => ({
+                title:
+                  item.origin === "knowledge"
+                    ? `[Dataset${item.typeLabel ? `/${item.typeLabel}` : ""}] ${item.title}`
+                    : item.title,
+                url: item.url,
+              }))
             );
+            if (knowledgeCount > 0) {
+              updateMessageInThread(threadId, assistantId, {
+                meta: {
+                  knowledge: {
+                    used: true,
+                    sourceCount: knowledgeCount,
+                    engine: knowledgeEngine || undefined,
+                  },
+                },
+              });
+            }
 
             searchContext = usable
               .map((r, i) => {
                 const snip = r.snippet ? String(r.snippet).trim() : "";
                 const short = snip.length > 260 ? `${snip.slice(0, 260)}...` : snip;
-                return `[#${i + 1}] ${r.title}\nURL: ${r.url}${short ? `\nResumo: ${short}` : ""}`;
+                const sourceLabel =
+                  r.origin === "knowledge" ? `Dataset interno${r.typeLabel ? `/${r.typeLabel}` : ""}` : "Web";
+                return `[#${i + 1}] [${sourceLabel}] ${r.title}${r.url ? `\nURL: ${r.url}` : ""}${short ? `\nResumo: ${short}` : ""}`;
               })
               .join("\n\n");
 
             markReasoningStep(assistantId, "review", "done", `${usable.length} fontes relevantes`);
           } else {
             deepSearchAvailable = false;
-            markReasoningStep(assistantId, "search", "done", "Nenhuma fonte encontrada");
+            const failureNote =
+              knowledgeFailed || webFailed
+                ? "Busca interna/web indisponivel"
+                : "Nenhuma fonte encontrada";
+            markReasoningStep(assistantId, "search", "done", failureNote);
             markReasoningStep(assistantId, "review", "done", "Sem fontes para revisar");
-            preludeNotes.push("Aviso: DeepSearch nao retornou resultados nesta tentativa. Respondendo sem fontes.");
+            preludeNotes.push("Aviso: DeepSearch nao retornou fontes validas nesta tentativa. Respondendo sem fontes.");
           }
         } catch (e) {
           if (isAbortError(e) || signal.aborted) return;
@@ -2103,7 +3175,7 @@ export default function App() {
           }
           markReasoningStep(assistantId, "search", "done", "Falha na busca");
           markReasoningStep(assistantId, "review", "done", "Busca indisponivel");
-          preludeNotes.push("Aviso: DeepSearch falhou nesta tentativa. Respondendo sem fontes.");
+          preludeNotes.push("Aviso: DeepSearch (dataset/web) falhou nesta tentativa. Respondendo sem fontes.");
         }
       } else {
         markReasoningStep(assistantId, "analyze", "done");
@@ -2310,6 +3382,7 @@ export default function App() {
             "O modelo nao retornou texto nesta tentativa. Tente novamente ou troque o modelo em Settings.";
           updateMessageInThread(threadId, assistantId, { text: `${prelude}${finalText}` });
           markReasoningStep(assistantId, "answer", "done");
+          textChargeId = "";
           return;
         }
 
@@ -2322,8 +3395,12 @@ export default function App() {
           "O modelo nao retornou texto nesta tentativa. Tente novamente ou troque o modelo em Settings.";
         updateMessageInThread(threadId, assistantId, { text: `${prelude}${finalText}` });
         markReasoningStep(assistantId, "answer", "done");
+        textChargeId = "";
       } catch (error) {
-        if (isAbortError(error) || signal.aborted) return;
+        if (isAbortError(error) || signal.aborted) {
+          await refundTextCharge("text_cancelled");
+          return;
+        }
 
         // If moderation trips due to historical context, retry with minimal context (only the new question).
         if (isModerationError(error)) {
@@ -2341,12 +3418,15 @@ export default function App() {
             const text = parseNonStreamResponse(response).trim();
             if (text) {
               updateMessageInThread(threadId, assistantId, { text: `${prelude}${text}` });
+              textChargeId = "";
               return;
             }
           } catch (fallbackError) {
             if (isAbortError(fallbackError) || signal.aborted) return;
             // fallthrough to user-facing moderation message
           }
+
+          await refundTextCharge("text_moderation_failed");
 
           updateMessageInThread(threadId, assistantId, {
             text:
@@ -2360,6 +3440,7 @@ export default function App() {
         }
 
         if (isLowBalanceError(error)) {
+          await refundTextCharge("text_provider_low_balance");
           const economyModel = findEconomyModel(models);
           const canSwitchModel = economyModel && economyModel.id !== model;
 
@@ -2393,9 +3474,14 @@ export default function App() {
           return;
         }
 
+        await refundTextCharge("text_provider_failed");
         updateMessageInThread(threadId, assistantId, {
           text: `Erro ao chamar modelo Puter: ${getErrorMessage(error)}`,
         });
+      }
+
+      if (signal.aborted && textChargeId) {
+        await refundTextCharge("text_cancelled");
       }
     };
 
@@ -2419,6 +3505,46 @@ export default function App() {
       setTypingAssistantId((cur) => (cur === assistantId ? null : cur));
     }
     clearReasoningTrace(assistantId);
+  };
+
+  const handleRedeemBetaKey = async (licenseKey: string) => {
+    setBetaGateError("");
+    setBetaRedeeming(true);
+    try {
+      const token = await getToken().catch(() => null);
+      if (!token) {
+        setBetaGateError("Sua sessao expirou. Faca login novamente.");
+        return;
+      }
+
+      const response = await apiJson<{ success: boolean; access: BetaAccessState; checkout?: BetaCheckoutState }>(
+        "/api/beta/redeem",
+        { license_key: licenseKey },
+        token
+      );
+      if (response.access) setBetaAccess(response.access);
+      if (response.checkout) setBetaCheckout(response.checkout);
+      setBetaGateError("");
+    } catch (error) {
+      const payload = readApiErrorPayload(error);
+      const code = String(payload?.code || "");
+      if (code === "INVALID_KEY") {
+        setBetaGateError("Chave invalida. Confira e tente novamente.");
+      } else if (code === "KEY_ALREADY_USED") {
+        setBetaGateError("Essa chave ja foi utilizada.");
+      } else if (code === "ALREADY_LICENSED") {
+        setBetaGateError("Sua conta ja possui licenca ativa.");
+        try {
+          await refreshBetaAccess();
+        } catch {
+          // ignore
+        }
+      } else {
+        setBetaGateError(getErrorMessage(error));
+      }
+    } finally {
+      setBetaRedeeming(false);
+    }
   };
 
   return (
@@ -2470,6 +3596,10 @@ export default function App() {
               onOpenSettings={() => {
                 setSidebarOpen(false);
                 setSettingsOpen(true);
+              }}
+              onOpenKnowledgeStudio={() => {
+                setSidebarOpen(false);
+                setKnowledgeOpen(true);
               }}
               onLogout={() => {
                 setSidebarOpen(false);
@@ -2544,6 +3674,9 @@ export default function App() {
             onRemoveAttachment={(id) => {
               setPendingImages((prev) => prev.filter((img) => img.id !== id));
             }}
+            creditsRemaining={betaAccess?.credits ?? null}
+            creditPlanLabel={betaAccess?.plan_name || "Acesso Antecipado"}
+            videoBadgeLabel={betaAccess?.early_access?.video_warning_badge || "Beta"}
           />
 
           <Lightbox
@@ -2563,9 +3696,22 @@ export default function App() {
             onPuterDisconnect={handleDisconnectClick}
           />
 
+          <KnowledgeStudioModal open={knowledgeOpen} onClose={() => setKnowledgeOpen(false)} />
+
           <ProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
+
+          <BetaAccessGate
+            open={!betaLoading && !betaAccess?.licensed}
+            loading={betaLoading}
+            redeeming={betaRedeeming}
+            error={betaGateError}
+            access={betaAccess}
+            checkout={betaCheckout}
+            onRedeem={handleRedeemBetaKey}
+          />
         </div>
       </SignedIn>
     </>
   );
 }
+

@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState } from "react";
-import type { ClipboardEvent as ReactClipboardEvent } from "react";
+import type { ClipboardEvent as ReactClipboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import type { Tool } from "../types";
 
 type ComposerProps = {
@@ -13,6 +13,9 @@ type ComposerProps = {
   onPickImage: (file: File) => void;
   attachedImages: Array<{ id: string; name: string; previewUrl: string | null }>;
   onRemoveAttachment: (id: string) => void;
+  creditsRemaining?: number | null;
+  creditPlanLabel?: string | null;
+  videoBadgeLabel?: string | null;
 };
 
 function ToolSearchIcon() {
@@ -183,12 +186,18 @@ export default function Composer({
   onPickImage,
   attachedImages,
   onRemoveAttachment,
+  creditsRemaining,
+  creditPlanLabel,
+  videoBadgeLabel,
 }: ComposerProps) {
   const canSend = value.trim().length > 0 && !disabled;
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const keyPulseTimeoutRef = useRef<number | null>(null);
 
   const speechRef = useRef<any>(null);
   const [listening, setListening] = useState(false);
+  const [typingPulse, setTypingPulse] = useState(false);
+  const [hoverPreview, setHoverPreview] = useState<{ url: string; x: number; y: number } | null>(null);
 
   const speechSupported = useMemo(() => {
     try {
@@ -200,6 +209,10 @@ export default function Composer({
 
   useEffect(() => {
     return () => {
+      if (keyPulseTimeoutRef.current) {
+        window.clearTimeout(keyPulseTimeoutRef.current);
+        keyPulseTimeoutRef.current = null;
+      }
       try {
         speechRef.current?.stop?.();
       } catch {
@@ -207,6 +220,12 @@ export default function Composer({
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!hoverPreview) return;
+    const stillExists = attachedImages.some((item) => item.previewUrl === hoverPreview.url);
+    if (!stillExists) setHoverPreview(null);
+  }, [attachedImages, hoverPreview]);
 
   const toggleVoice = () => {
     if (!speechSupported) return;
@@ -279,13 +298,53 @@ export default function Composer({
     }
   };
 
+  const triggerTypingPulse = () => {
+    setTypingPulse(false);
+    window.requestAnimationFrame(() => {
+      setTypingPulse(true);
+    });
+    if (keyPulseTimeoutRef.current) window.clearTimeout(keyPulseTimeoutRef.current);
+    keyPulseTimeoutRef.current = window.setTimeout(() => {
+      setTypingPulse(false);
+      keyPulseTimeoutRef.current = null;
+    }, 220);
+  };
+
+  const placeHoverPreview = (event: ReactMouseEvent<HTMLElement>, url: string) => {
+    const previewWidth = 300;
+    const previewHeight = 220;
+    const padding = 14;
+    const offsetX = 18;
+    const offsetY = 14;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const x = Math.min(Math.max(event.clientX + offsetX, padding), Math.max(padding, vw - previewWidth - padding));
+    const y = Math.min(Math.max(event.clientY - previewHeight - offsetY, padding), Math.max(padding, vh - previewHeight - padding));
+    setHoverPreview({ url, x, y });
+  };
+
   return (
     <footer className="composer-shell">
       <div className="composer-inner">
         {attachedImages.length > 0 ? (
           <div className="attachment-chips" role="status" aria-label="Imagens anexadas">
             {attachedImages.map((attachment) => (
-              <div key={attachment.id} className="attachment-chip" aria-label={`Imagem anexada: ${attachment.name}`}>
+              <div
+                key={attachment.id}
+                className={`attachment-chip ${attachment.previewUrl ? "previewable" : ""}`}
+                aria-label={`Imagem anexada: ${attachment.name}`}
+                onMouseEnter={(event) => {
+                  if (!attachment.previewUrl) return;
+                  placeHoverPreview(event, attachment.previewUrl);
+                }}
+                onMouseMove={(event) => {
+                  if (!attachment.previewUrl) return;
+                  placeHoverPreview(event, attachment.previewUrl);
+                }}
+                onMouseLeave={() => {
+                  setHoverPreview(null);
+                }}
+              >
                 {attachment.previewUrl ? (
                   <img className="attachment-chip-thumb" src={attachment.previewUrl} alt="" aria-hidden="true" />
                 ) : (
@@ -304,7 +363,23 @@ export default function Composer({
           </div>
         ) : null}
 
+        {hoverPreview ? (
+          <div
+            className="attachment-hover-preview"
+            style={{
+              left: `${hoverPreview.x}px`,
+              top: `${hoverPreview.y}px`,
+            }}
+            aria-hidden="true"
+          >
+            <img className="attachment-hover-preview-media" src={hoverPreview.url} alt="" />
+          </div>
+        ) : null}
+
         <div className="tools-row" role="toolbar" aria-label="AI tools">
+          {typeof creditsRemaining === "number" ? (
+            <span className="composer-credit-pill">{`${creditPlanLabel || "Acesso"}: ${creditsRemaining} creditos`}</span>
+          ) : null}
           {TOOLS.map((tool) => (
             <button
               key={tool.id}
@@ -316,11 +391,12 @@ export default function Composer({
                 {renderToolIcon(tool.icon)}
               </span>
               {tool.label}
+              {tool.id === "create-video" && videoBadgeLabel ? <span className="tool-pill-badge">{videoBadgeLabel}</span> : null}
             </button>
           ))}
         </div>
 
-        <div className="composer-box">
+        <div className={`composer-box ${typingPulse ? "typing-pulse" : ""}`.trim()}>
           <input
             ref={fileRef}
             type="file"
@@ -347,6 +423,14 @@ export default function Composer({
             onPaste={onPaste}
             // Enter sends, Shift+Enter creates a new line.
             onKeyDown={(event) => {
+              if (
+                event.key.length === 1 ||
+                event.key === "Backspace" ||
+                event.key === "Delete" ||
+                event.key === "Enter"
+              ) {
+                triggerTypingPulse();
+              }
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
                 if (canSend) onSubmit();
